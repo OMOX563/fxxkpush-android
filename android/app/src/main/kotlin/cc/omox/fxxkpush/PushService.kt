@@ -132,14 +132,15 @@ class PushService : Service() {
     private fun tryWhitelistDoze() {
         try {
             // 方式1：root（su）—— 静默加白名单
-            val cmd = arrayOf(
+            // ProcessBuilder 只接受 List<String>，Array<String> 会类型不匹配
+            val cmd = listOf(
                 "su", "-c",
                 "dumpsys deviceidle whitelist +$packageName"
             )
-            val p = ProcessBuilder(cmd).redirectErrorStream(true).start()
-            p.inputStream.use { it.readBytes() }
-            p.waitFor()
-            Log.i(TAG, "doze whitelist via su: exit=${p.exitValue()}")
+            val proc = ProcessBuilder(cmd).redirectErrorStream(true).start()
+            proc.inputStream.use { it.readBytes() }
+            proc.waitFor()
+            Log.i(TAG, "doze whitelist via su: exit=${proc.exitValue()}")
         } catch (e: Exception) {
             Log.w(TAG, "doze whitelist via su failed: ${e.message}")
         }

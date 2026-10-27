@@ -47,7 +47,9 @@ class BootReceiver : BroadcastReceiver() {
         }
 
         val svcIntent = Intent(context, PushService::class.java).apply {
-            action = ACTION_START
+            // Intent.action 是 val —— 必须用 setAction()，不能 `action = ...`
+            // （同名还会遮蔽掉 companion 的 ACTION_START 常量）
+            setAction(ACTION_START)
             putExtra("baseUrl", baseUrl)
             putExtra("token", token)
             putExtra("topic", topic)

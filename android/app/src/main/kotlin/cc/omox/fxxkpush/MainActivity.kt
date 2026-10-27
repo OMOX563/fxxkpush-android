@@ -79,7 +79,8 @@ class MainActivity : FlutterActivity() {
                     val topic = call.argument<String>("topic") ?: "fp-phone"
 
                     val intent = Intent(this, PushService::class.java).apply {
-                        action = PushService.ACTION_START
+                        // Intent.action 是 val —— 必须 setAction()，不能 `action = ...`
+                        setAction(PushService.ACTION_START)
                         putExtra("baseUrl", baseUrl)
                         putExtra("token", token)
                         putExtra("topic", topic)
@@ -94,7 +95,7 @@ class MainActivity : FlutterActivity() {
 
                 "stopService" -> {
                     val intent = Intent(this, PushService::class.java).apply {
-                        action = PushService.ACTION_STOP
+                        setAction(PushService.ACTION_STOP)
                     }
                     startService(intent)
                     result.success(true)

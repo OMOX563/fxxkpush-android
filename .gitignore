@@ -32,3 +32,8 @@ Thumbs.db
 
 # 本地日志
 *.log
+
+# 图标草稿（临时素材）
+_icon*.png
+icon_new_*.png
+old_apk_icon.png

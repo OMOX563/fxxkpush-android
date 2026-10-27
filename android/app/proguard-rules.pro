@@ -12,3 +12,6 @@
 
 # Kotlin 协程
 -dontwarn kotlinx.coroutines.**
+
+# Play Core 延迟组件（Flutter 引擎引用，但本项目未引入该依赖）
+-dontwarn com.google.android.play.core.**

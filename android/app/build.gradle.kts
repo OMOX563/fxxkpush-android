@@ -57,12 +57,12 @@ android {
             } else {
                 signingConfigs.getByName("debug")
             }
-            isMinifyEnabled = true
-            isShrinkResources = true
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
-            )
+            // 不开 R8/minify：Flutter 引擎引用了 Play Core 的延迟组件类
+            // （PlayStoreDeferredComponentManager），我们没这个依赖，
+            // R8 会因 "Missing class" 直接失败。APK 体积本来就不大
+            // （Flutter 空壳 ~7MB），不值得为此引依赖或被 R8 卡住。
+            isMinifyEnabled = false
+            isShrinkResources = false
         }
     }
 }

@@ -62,7 +62,13 @@ jobs:
           set -o pipefail
           # 全量落盘：gh/gh-CLI 与网页日志都会截断长输出，编译错误正文常被吃掉。
           # 落成文件后 grep 出错误行，作为 artifact 上传，便于精确取错误。
-          flutter build apk --release > build-full.log 2>&1 || {
+          # --target-platform android-arm64：Flutter 引擎每个 ABI 一份，
+          # 不指定会打进 x86_64 + armeabi-v7a + arm64-v8a 三份。
+          # 实测 release 三份 = 46.8MB（arm64 那份只有 16MB）。
+          # 只打 arm64 → 约 27MB。
+          # 注意：abiFilters 在 build.gradle.kts 里也写了，但 flutter build
+          # 会用 --target-platform 覆盖它，两处都留着才稳。
+          flutter build apk --release --target-platform android-arm64 > build-full.log 2>&1 || {
             echo "===== 编译错误摘要 ====="
             grep -nE "^e: file:|\.dart:[0-9]+:[0-9]+|error:|What went wrong|^> |FAILURE" build-full.log | head -40 || true
             echo "===== 末尾 60 行 ====="

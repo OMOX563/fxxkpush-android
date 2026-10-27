@@ -28,6 +28,15 @@ android {
         // flag during build.
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        // 只打 arm64-v8a —— 目标机型（用户手机）是 arm64。
+        // Flutter 引擎每个 ABI 一份，debug 构建实测：
+        //   arm64-v8a 51.7MB + x86_64 38.3MB + armeabi-v7a 31.7MB = 121.7MB
+        // release 构建同样会带上三份，APK 直接膨胀到 54MB。
+        // 砍掉后 release 约 20MB。
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     // 签名：本地/CI 有 android/key.properties 就用它，没有就退回 debug key。

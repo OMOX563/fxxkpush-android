@@ -73,7 +73,16 @@ jobs:
 
       - name: Rename APK
         run: |
-          VERSION=$(grep '^version:' pubspec.yaml | head -1 | sed 's/.*=\s*//' | cut -d+ -f1)
+          # pubspec.yaml 里是 `version: 1.0.0+1`（冒号，不是等号）。
+          # 原来的 sed 's/.*=\s*//' 匹配不到，整行原样留下 →
+          # APK 文件名变成 "FxxkPush-version: 1.0.0-android.apk"，
+          # 名字里带冒号和空格，upload-artifact 直接拒绝（路径非法）。
+          VERSION=$(grep -E '^version:' pubspec.yaml | head -1 \
+                    | sed -E 's/^version:[[:space:]]*//' | cut -d+ -f1)
+          if [ -z "$VERSION" ] || echo "$VERSION" | grep -q '[^A-Za-z0-9._-]'; then
+            echo "::error::版本号解析失败: '$VERSION'"
+            exit 1
+          fi
           SRC=build/app/outputs/flutter-apk/app-release.apk
           cp "$SRC" "FxxkPush-${VERSION}-android.apk"
           echo "APK_PATH=FxxkPush-${VERSION}-android.apk" >> $GITHUB_ENV

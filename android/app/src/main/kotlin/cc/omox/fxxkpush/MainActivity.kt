@@ -1,0 +1,184 @@
+package cc.omox.fxxkpush
+
+import android.content.Intent
+import android.os.Build
+import android.os.Bundle
+import android.util.Log
+import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.EventChannel
+import io.flutter.plugin.common.MethodCall
+import io.flutter.plugin.common.MethodChannel
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONObject
+import java.util.concurrent.TimeUnit
+
+/**
+ * Flutter 宿主 Activity。
+ *
+ * 职责：
+ *  1. MethodChannel：把 Dart 的调用转给原生（启停前台服务、读缓存、发反馈）
+ *  2. 深链：接住通知点击（fxxkpush://message/<id>）并转给 Dart
+ */
+class MainActivity : FlutterActivity() {
+
+    companion object {
+        private const val TAG = "FxxkPush"
+        const val CHANNEL = "cc.omox.fxxkpush/methods"
+        const val EVENT_CHANNEL = "cc.omox.fxxkpush/events"
+    }
+
+    private var pendingDeepLink: String? = null
+    private var eventSink: EventChannel.EventSink? = null
+
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
+            .setMethodCallHandler { call, result -> onMethodCall(call, result) }
+
+        EventChannel(flutterEngine.dartExecutor.binaryMessenger, EVENT_CHANNEL)
+            .setStreamHandler(object : EventChannel.StreamHandler {
+                override fun onListen(arguments: Any?, sink: EventChannel.EventSink) {
+                    eventSink = sink
+                    // 有 pending 深链就先补发
+                    pendingDeepLink?.let {
+                        sink.success(mapOf("type" to "deeplink", "value" to it))
+                        pendingDeepLink = null
+                    }
+                }
+
+                override fun onCancel(arguments: Any?) {
+                    eventSink = null
+                }
+            })
+    }
+
+    private fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
+        try {
+            when (call.method) {
+                "isServiceRunning" -> {
+                    result.success(PushService.instance != null)
+                }
+
+                "startService" -> {
+                    val baseUrl = call.argument<String>("baseUrl") ?: ""
+                    val token = call.argument<String>("token") ?: ""
+                    val topic = call.argument<String>("topic") ?: "fp-phone"
+
+                    val intent = Intent(this, PushService::class.java).apply {
+                        action = PushService.ACTION_START
+                        putExtra("baseUrl", baseUrl)
+                        putExtra("token", token)
+                        putExtra("topic", topic)
+                    }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        startForegroundService(intent)
+                    } else {
+                        startService(intent)
+                    }
+                    result.success(true)
+                }
+
+                "stopService" -> {
+                    val intent = Intent(this, PushService::class.java).apply {
+                        action = PushService.ACTION_STOP
+                    }
+                    startService(intent)
+                    result.success(true)
+                }
+
+                "fetchMessages" -> {
+                    val limit = call.argument<Int>("limit") ?: 200
+                    val svc = PushService.instance
+                    result.success(svc?.fetchMessages(limit) ?: emptyList<String>())
+                }
+
+                "clearMessages" -> {
+                    PushService.instance?.clearMessages()
+                    result.success(true)
+                }
+
+                "connectionState" -> {
+                    result.success(PushService.connectionState)
+                }
+
+                "publish" -> {
+                    publishFeedback(call, result)
+                }
+
+                else -> result.notImplemented()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "method call failed: ${call.method}", e)
+            result.error("ERR", e.message, null)
+        }
+    }
+
+    /** 反馈（👍/👎）—— 直接 POST 到 ntfy 的 publish 接口 */
+    private fun publishFeedback(call: MethodCall, result: MethodChannel.Result) {
+        val baseUrl = call.argument<String>("baseUrl") ?: ""
+        val token = call.argument<String>("token") ?: ""
+        val topic = call.argument<String>("topic") ?: ""
+        val message = call.argument<String>("message") ?: ""
+
+        if (baseUrl.isBlank() || topic.isBlank()) {
+            result.success(false)
+            return
+        }
+
+        Thread {
+            var ok = false
+            try {
+                val json = JSONObject().apply { put("message", message) }
+                val body = json.toString()
+                    .toRequestBody("application/json; charset=utf-8".toMediaType())
+                val b = baseUrl.trimEnd('/')
+                val req = Request.Builder()
+                    .url("$b/$topic")
+                    .post(body)
+                    .apply { if (token.isNotEmpty()) header("Authorization", "Bearer $token") }
+                    .build()
+                val client = OkHttpClient.Builder()
+                    .connectTimeout(10, TimeUnit.SECONDS)
+                    .writeTimeout(10, TimeUnit.SECONDS)
+                    .build()
+                client.newCall(req).execute().use { resp ->
+                    ok = resp.isSuccessful
+                    if (!ok) Log.w(TAG, "publish feedback HTTP ${resp.code}")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "publish feedback failed: ${e.message}")
+                ok = false
+            }
+            runOnUiThread { result.success(ok) }
+        }
+    }
+
+    /** 深链：通知点击 → fxxkpush://message/<id> */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleDeepLink(intent)
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        handleDeepLink(intent)
+    }
+
+    private fun handleDeepLink(intent: Intent?) {
+        val data = intent?.data ?: return
+        if (data.scheme != "fxxkpush") return
+        val value = "${data.host}${data.path}"
+        Log.i(TAG, "deep link: $value")
+        val sink = eventSink
+        if (sink != null) {
+            sink.success(mapOf("type" to "deeplink", "value" to value))
+        } else {
+            pendingDeepLink = value
+        }
+    }
+}

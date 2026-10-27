@@ -1,0 +1,103 @@
+name: Build FxxkPush APK
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 打 tag 建 Release 时需要
+    env:
+      FLUTTER_VERSION: '3.47.7'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Create keystore from PEM
+        run: |
+          echo "${{ secrets.KEY_PEM_B64 }}" | base64 -d > /tmp/key.pem
+          echo "${{ secrets.CERT_PEM_B64 }}" | base64 -d > /tmp/cert.pem
+          openssl pkcs12 -export \
+            -in /tmp/cert.pem -inkey /tmp/key.pem \
+            -out /tmp/fxxkpush.p12 \
+            -name fxxkpush \
+            -passout pass:${{ secrets.KEYSTORE_PASS }} \
+            -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1
+          keytool -list -keystore /tmp/fxxkpush.p12 \
+            -storepass ${{ secrets.KEYSTORE_PASS }} \
+            -storetype PKCS12 | grep fxxkpush
+          echo "KEYSTORE_PATH=/tmp/fxxkpush.p12" >> $GITHUB_ENV
+
+      - name: Write key.properties
+        run: |
+          cat > android/key.properties <<EOF
+          storePassword=${{ secrets.KEYSTORE_PASS }}
+          keyPassword=${{ secrets.KEY_PASS }}
+          keyAlias=fxxkpush
+          storeFile=${{ env.KEYSTORE_PATH }}
+          EOF
+
+      - name: Build release APK
+        run: |
+          set -o pipefail
+          # 全量落盘：gh/gh-CLI 与网页日志都会截断长输出，编译错误正文常被吃掉。
+          # 落成文件后 grep 出错误行，作为 artifact 上传，便于精确取错误。
+          flutter build apk --release > build-full.log 2>&1 || {
+            echo "===== 编译错误摘要 ====="
+            grep -nE "^e: file:|\.dart:[0-9]+:[0-9]+|error:|What went wrong|^> |FAILURE" build-full.log | head -40 || true
+            echo "===== 末尾 60 行 ====="
+            tail -60 build-full.log
+            exit 1
+          }
+          tail -5 build-full.log
+
+      - name: Rename APK
+        run: |
+          VERSION=$(grep '^version:' pubspec.yaml | head -1 | sed 's/.*=\s*//' | cut -d+ -f1)
+          SRC=build/app/outputs/flutter-apk/app-release.apk
+          cp "$SRC" "FxxkPush-${VERSION}-android.apk"
+          echo "APK_PATH=FxxkPush-${VERSION}-android.apk" >> $GITHUB_ENV
+          ls -lh "FxxkPush-${VERSION}-android.apk"
+
+      - name: Upload build log (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build-full.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fxxkpush-apk
+          path: ${{ env.APK_PATH }}
+          retention-days: 7
+
+      - name: Create Release (tag only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.APK_PATH }}
+          generate_release_notes: true

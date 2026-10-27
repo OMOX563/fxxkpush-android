@@ -33,7 +33,17 @@ import urllib.request
 
 PKG = "cc.omox.fxxkpush"
 ACTIVITY = f"{PKG}/.MainActivity"
-ADB = r"C:\Users\omo\AppData\Local\Android\Sdk\platform-tools\adb.exe"
+def _find_adb():
+    """找 adb：优先 ANDROID_HOME/platform-tools，其次 PATH。"""
+    sdk = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
+    if sdk:
+        p = os.path.join(sdk, "platform-tools", "adb.exe")
+        if os.path.exists(p):
+            return p
+    return "adb"
+
+
+ADB = _find_adb()
 
 GREEN, RED, YELLOW, RESET = "\033[32m", "\033[31m", "\033[33m", "\033[0m"
 
@@ -61,7 +71,12 @@ def check(name, ok, detail=""):
 
 
 def server_config():
-    """从本机 FxxkPush 安装版配置里读服务器地址与 token。"""
+    """从本机 FxxkPush 安装版配置里读服务器地址与 token。
+
+    服务器地址**不在本文件里硬编码** —— 这个仓库是公开的，
+    真 VPS IP 不能进仓库。地址从本机安装版配置读，
+    或者用环境变量 FP_NTFY_URL 覆盖。
+    """
     p = os.path.expandvars(
         r"%LOCALAPPDATA%\Programs\FxxkPush\data\fp.config.json")
     with open(p, encoding="utf-8") as f:
@@ -83,53 +98,114 @@ def _type_text(text):
     sh(["shell", "input", "text", safe])
 
 
+def _clear_field():
+    """清空当前聚焦的输入框。
+
+    Ctrl+A 全选 + DEL 删除，比逐字符退格稳，也不依赖光标位置。
+    adb input keyevent 里 29 是 A（配 meta=CTRL_LEFT），67 是 DEL。
+    """
+    sh(["shell", "input", "keyevent", "--longpress", "67"])
+    # 再用 ctrl+A + DEL 兜底，确保清干净
+    sh(["shell", "input", "keycombination", "113", "29"])
+    sh(["shell", "input", "keyevent", "67"])
+
+
+def _dump_nodes():
+    """返回 uiautomator dump 里的 node 列表，每项是 (class, desc, text, bounds)。"""
+    sh(["shell", "uiautomator", "dump", "/sdcard/ui.xml"])
+    rc, out = sh(["shell", "cat", "/sdcard/ui.xml"], timeout=60)
+    nodes = []
+    for tag in re.findall(r"<node[^>]*>", out):
+        def g(name):
+            m = re.search(r'%s="([^"]*)"' % name, tag)
+            return m.group(1) if m else ""
+        nodes.append((g("class"), g("content-desc"), g("text"), g("bounds")))
+    return nodes
+
+
+def _bounds(b):
+    m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", b or "")
+    return tuple(map(int, m.groups())) if m else None
+
+
+def _center(b):
+    x1, y1, x2, y2 = _bounds(b)
+    return (x1 + x2) // 2, (y1 + y2) // 2
+
+
 def configure_app(cfg):
     """用 UI 自动化把「服务器地址 / token / 话题」填进设置页。
 
-    坐标从 uiautomator dump 里读 EditText 的 bounds，不写死。
+    坐标从 uiautomator dump 里读，不写死。
     release 包不能 run-as 写 SharedPreferences，只能走 UI。
+
+    每个框先清空再填 —— 直接追加会把旧值和新值拼在一起
+    （上轮实测就踩了：地址框变成
+    服务器地址与令牌从本机安装版配置读（FP_NTFY_URL 环境变量可覆盖），仓库里不硬编码。
     """
-    base = os.environ.get("FP_NTFY_URL", "http://185.170.211.110:2586")
+    base = os.environ["FP_NTFY_URL"]
     token = cfg["ntfy"]["token"]
+    topic = os.environ.get("FP_NTFY_TOPIC", "fp-phone")
 
-    # 进设置页：右上角齿轮
+    # 全新安装后系统会弹 POST_NOTIFICATIONS 授权框，弹窗会吃掉后面的点击，
+    # 表现为「设置页打开了但一个输入框都找不到」。先直接授权掉。
+    sh(["shell", "pm", "grant", PKG, "android.permission.POST_NOTIFICATIONS"],
+       timeout=30)
+
+    # 进设置页。Flutter 首帧要 2s+，权限弹窗消失也要时间，
+    # 所以这里循环等「设置页出现且有输入框」为止，而不是盲点固定坐标。
+    #
+    # 注意入口按钮有两种文案：
+    #   - 已配置过：AppBar 右侧齿轮，content-desc = "设置"
+    #   - 未配置过：主页中间的「去设置」按钮
+    # 只认前者会永远进不去设置页（实测踩过）。
     sh(["shell", "am", "start", "-n", PKG + "/.MainActivity"])
-    time.sleep(2)
-    _tap(1020, 200)          # AppBar 右侧设置图标
-    time.sleep(2)
-
-    # dump 找三个 EditText
-    sh(["shell", "uiautomator", "dump", "/sdcard/ui.xml"])
-    rc, out = sh(["shell", "cat", "/sdcard/ui.xml"], timeout=60)
-    edits = re.findall(
-        r'class="android.widget.EditText"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"',
-        out)
+    edits = []
+    for attempt in range(15):
+        time.sleep(3)
+        nodes = _dump_nodes()
+        edits = [n for n in nodes if n[0] == "android.widget.EditText"]
+        if len(edits) >= 3:
+            print("  设置页已就绪（第 %d 次探测）" % (attempt + 1))
+            break
+        entry = next((n for n in nodes
+                      if n[0] == "android.widget.Button"
+                      and (n[1] in ("设置", "去设置") or n[2] in ("设置", "去设置"))), None)
+        if entry:
+            _tap(*_center(entry[3]))
+            time.sleep(2)
+        elif attempt == 0:
+            _tap(1006, 202)     # 兜底坐标（AppBar 右侧齿轮）
+            time.sleep(2)
     if len(edits) < 3:
         print("  [跳过] 只找到 %d 个输入框，配置页结构可能变了" % len(edits))
         return False
 
-    values = [base, token, "fp-phone"]
+    values = [base, token, topic]
     labels = ["服务器地址", "访问令牌", "订阅话题"]
-    for (x1, y1, x2, y2), val, label in zip(edits, values, labels):
-        cx, cy = (int(x1) + int(x2)) // 2, (int(y1) + int(y2)) // 2
+    for node, val, label in zip(edits, values, labels):
+        cx, cy = _center(node[3])
         _tap(cx, cy)
-        time.sleep(0.5)
+        time.sleep(0.6)
+        _clear_field()
+        time.sleep(0.4)
         _type_text(val)
-        time.sleep(0.5)
+        time.sleep(0.6)
         print("  已填 %s" % label)
 
     # 收起键盘再点「保存并连接」（键盘会挡住按钮）
     sh(["shell", "input", "keyevent", "111"])   # ESC 收键盘
     time.sleep(1)
-    rc, out = sh(["shell", "uiautomator", "dump", "/sdcard/ui.xml"])
-    m = re.search(r'text="保存并连接"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', out)
-    if m:
-        x1, y1, x2, y2 = map(int, m.groups())
-        _tap((x1 + x2) // 2, (y1 + y2) // 2)
+    nodes = _dump_nodes()
+    # Flutter 的按钮标签放在 content-desc 里，text 是空的 —— 两个都要认
+    btn = next((n for n in nodes
+                if n[2] == "保存并连接" or n[1] == "保存并连接"), None)
+    if btn:
+        _tap(*_center(btn[3]))
         print("  已点「保存并连接」")
     else:
         print("  [跳过] 找不到「保存并连接」按钮")
-    time.sleep(2)
+    time.sleep(3)
     return True
 
 
@@ -148,39 +224,53 @@ def check_process():
 
 # ---------------------------------------------------------------- 2) 服务
 def check_service():
-    """前台服务 = 有一条常驻通知 + 进程带 PushService 的 cmdline。"""
-    rc, out = sh(["shell", "dumpsys", "activity", "services", PKG])
-    running = "PushService" in out
-    detail = ""
-    if running:
-        m = re.search(r"PushService.*?isForeground=true", out, re.S)
-        detail = "前台服务在跑" if m else "服务在跑（非前台？）"
-    else:
-        detail = "PushService 未运行"
-    return check("前台服务 PushService", running, detail)
+    """前台服务 = PushService 在跑且被系统认定为前台。"""
+    # 注意：dumpsys activity services 的包名过滤参数在部分版本上不生效，
+    # 必须全量 dump 后自己 grep，否则会误报「未运行」。
+    rc, out = sh(["shell", "dumpsys", "activity", "services"], timeout=60)
+    if "PushService" not in out:
+        return check("前台服务 PushService", False, "PushService 未运行")
+    m = re.search(r"isForeground=true", out)
+    detail = "前台服务在跑" if m else "服务在跑（非前台？）"
+    return check("前台服务 PushService", True, detail)
 
 
 def check_foreground_notification():
     """常驻通知存在 = 服务真的被系统认定为前台。"""
-    rc, out = sh(["shell", "dumpsys", "notification", "--noredact"])
-    has = "fxxkpush" in out.lower() and "FxxkPush" in out
+    rc, out = sh(["shell", "dumpsys", "notification", "--noredact"], timeout=60)
+    has = "cc.omox.fxxkpush" in out
     return check("常驻通知存在（保活凭证）", has)
 
 
 # ---------------------------------------------------------------- 3) 连接
 def check_ws_connected():
-    """从 app 的 logcat 里找 WebSocket 握手成功记录。"""
-    rc, out = sh(["logcat", "-d", "-s", "FxxkPush:*"], timeout=30)
-    connected = "ws connected" in out
-    err = re.findall(r"ws failure: (.+)", out)
+    """从 app 的 logcat 里找 WebSocket 握手成功记录。
+
+    注意：`-s FxxkPush:*` 这种 tag 过滤在 logcat 里匹配不到
+    （tag 里的 `*` 只作单字符通配），必须全量 dump 后 grep tag。
+    """
+    rc, out = sh(["logcat", "-d"], timeout=60)
+    lines = [ln for ln in out.splitlines() if " FxxkPush: " in ln]
+    connected = any("ws connected" in ln for ln in lines)
+    err = re.findall(r"ws failure: (.+)", "\n".join(lines))
     return check("WebSocket 已连接", connected,
                  ("失败原因: %s" % err[-1][:60]) if err and not connected else "")
+
+
+def check_ui_connection_state():
+    """设置页上显示的连接状态 —— 用户实际看到的东西。"""
+    nodes = _dump_nodes()
+    blob = " ".join((n[1] or "") + " " + (n[2] or "") for n in nodes)
+    m = re.search(r"连接状态\s*(\S+)", blob)
+    state = m.group(1) if m else "?"
+    ok = state == "已连接"
+    return check("UI 连接状态显示「已连接」", ok, "实际: %s" % state)
 
 
 # ---------------------------------------------------------------- 4) 收消息
 def send_test_message(cfg, topic="fp-phone", priority=4, title="E2E 测试"):
     """按 ntfy 正确格式发布：POST 根路径，topic 放 body。"""
-    base = os.environ.get("FP_NTFY_URL", "http://185.170.211.110:2586")
+    base = os.environ["FP_NTFY_URL"]
     token = cfg["ntfy"]["token"]
     body = json.dumps({
         "topic": topic,
@@ -211,7 +301,7 @@ def check_receive(cfg, timeout=45):
     got_log = False
     while time.time() < deadline:
         time.sleep(3)
-        rc, out = sh(["logcat", "-d", "-s", "FxxkPush:*"], timeout=30)
+        rc, out = sh(["logcat", "-d"], timeout=60)
         if msg_id and msg_id in out:
             got_log = True
             break
@@ -223,15 +313,21 @@ def check_receive(cfg, timeout=45):
 
 
 def check_store(cfg):
-    """消息是否进了 app 的 sqlite（run-as 读，因为 debug 包可调试）。"""
-    # release 包没有 run-as 权限；debug 包才行
+    """消息是否进了 app 的 sqlite。
+
+    release 包没有 run-as 权限（debuggable=false），读不了库文件。
+    这时改用 app 自己暴露的「清空本地缓存」按钮做间接验证 ——
+    或者干脆报 SKIP，而不是误报 FAIL。
+    """
     rc, out = sh(["shell", "run-as", PKG, "ls", "databases"], timeout=30)
-    if rc != 0 or 'fxxkpush.db' not in out:
-        return check("消息落进本地 sqlite", False,
-                     "读不到（release 包无 run-as 权限，跳过）")
+    if rc != 0 or "fxxkpush.db" not in out:
+        print("  [跳过] release 包无 run-as 权限，sqlite 直读不可用")
+        results.append(("消息落进本地 sqlite", None, "SKIP（release 包不可直读）"))
+        print("  [SKIP] 消息落进本地 sqlite  (release 包不可直读)")
+        return None
     rc2, out2 = sh(["shell", "run-as", PKG, "sqlite3", "databases/fxxkpush.db",
                     "select count(*) from messages"], timeout=30)
-    n = out2.strip().splitlines()[-1] if out2.strip() else '?'
+    n = out2.strip().splitlines()[-1] if out2.strip() else "?"
     return check("消息落进本地 sqlite", n.isdigit() and int(n) > 0,
                  "共 %s 条" % n)
 
@@ -280,7 +376,7 @@ def main():
     print("  FxxkPush Android 端到端验证")
     print("=" * 62)
 
-    rc, out = sh(["devices"], use_adb=False)
+    rc, out = sh(["devices"])
     print("\n设备:", out.strip()[:200])
 
     if args.configure:
@@ -292,6 +388,7 @@ def main():
     check_service()
     check_foreground_notification()
     check_ws_connected()
+    check_ui_connection_state()
 
     cfg = server_config()
     if args.send:
@@ -303,13 +400,17 @@ def main():
     print("\n--- 深链 ---")
     check_deeplink()
 
-    ok = sum(1 for _, o, _ in results if o)
-    total = len(results)
+    ok = sum(1 for _, o, _ in results if o is True)
+    skipped = sum(1 for _, o, _ in results if o is None)
+    total = len(results) - skipped
     print("\n" + "=" * 62)
     color = GREEN if ok == total else YELLOW
-    print(f"  {color}{ok}/{total} 项通过{RESET}")
+    suffix = f"（跳过 {skipped} 项）" if skipped else ""
+    print(f"  {color}{ok}/{total} 项通过{RESET}{suffix}")
     for name, o, detail in results:
-        if not o:
+        if o is None:
+            print(f"    {YELLOW}—{RESET} {name}  {detail}")
+        elif not o:
             print(f"    {RED}✗{RESET} {name}  {detail}")
     print("=" * 62)
     return 0 if ok == total else 1

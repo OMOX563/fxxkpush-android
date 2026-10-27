@@ -38,3 +38,6 @@ Thumbs.db
 _icon*.png
 icon_new_*.png
 old_apk_icon.png
+
+# 本地构建产物
+releases/

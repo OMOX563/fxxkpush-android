@@ -10,6 +10,7 @@ build/
 
 # Android
 android/.gradle/
+android/.kotlin/
 android/local.properties
 android/key.properties          # 签名材料，绝不进 git
 android/app/debug/

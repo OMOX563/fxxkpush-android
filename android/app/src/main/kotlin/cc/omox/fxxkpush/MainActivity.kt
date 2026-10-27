@@ -34,6 +34,15 @@ class MainActivity : FlutterActivity() {
     private var pendingDeepLink: String? = null
     private var eventSink: EventChannel.EventSink? = null
 
+    /**
+     * 消息存储单例 —— 与 PushService 共用同一个 sqlite 文件。
+     *
+     * 刻意**不**走 PushService.instance：服务没跑的时候（冷启动、被系统杀、
+     * 用户手动断开）也要能读历史消息，否则冷启动打开看到空列表，
+     * 而用户明明收到过通知。
+     */
+    private val store: MessageStore by lazy { MessageStore(applicationContext) }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
@@ -93,12 +102,11 @@ class MainActivity : FlutterActivity() {
 
                 "fetchMessages" -> {
                     val limit = call.argument<Int>("limit") ?: 200
-                    val svc = PushService.instance
-                    result.success(svc?.fetchMessages(limit) ?: emptyList<String>())
+                    result.success(store.fetch(limit))
                 }
 
                 "clearMessages" -> {
-                    PushService.instance?.clearMessages()
+                    store.clear()
                     result.success(true)
                 }
 

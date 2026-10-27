@@ -59,7 +59,6 @@ class PushService : Service() {
     private var socket: WebSocket? = null
     private var reconnectDelay = RECONNECT_BASE_MS
     private var wakeLock: PowerManager.WakeLock? = null
-    private lateinit var store: MessageStore
 
     private var baseUrl = ""
     private var token = ""
@@ -68,9 +67,16 @@ class PushService : Service() {
     override fun onCreate() {
         super.onCreate()
         instance = this
-        store = MessageStore(this)
         Notifier.ensureChannels(this)
     }
+
+    /** 消息存储单例。
+     *
+     * 不能只在 Service 里 new —— Service 没跑的时候（冷启动、被系统杀、
+     * 用户手动断开）Dart 侧照样要能读历史消息。挂成单例，
+     * MainActivity 与 Service 共用同一个 sqlite 句柄。
+     */
+    private val store: MessageStore by lazy { MessageStore(applicationContext) }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {

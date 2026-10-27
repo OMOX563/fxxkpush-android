@@ -18,6 +18,9 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
+  /// 深链目标在本地缓存里找不到的轮数（兜底用，避免深链永远挂着）
+  int _missingDeepLinkRounds = 0;
+
   @override
   void initState() {
     super.initState();
@@ -40,20 +43,44 @@ class _HomePageState extends State<HomePage> {
     final g = context.glass;
 
     // 处理深链（点通知进来）
-    final pending = s.takePendingDeepLink();
+    //
+    // 关键：只有在**消息列表里确实有那条消息**时才消费深链。
+    // 冷启动时原生可能已存了消息但 Dart 还没拉完（refreshMessages 是异步的），
+    // 这时若把深链取走就再也找不回来 —— 表现为「点通知进 app 但什么都没发生」。
+    final pending = s.peekPendingDeepLink();
     if (pending != null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        final msg = s.messages.cast<NtfyMessage?>().firstWhere(
-              (m) => m?.id == pending,
-              orElse: () => null,
-            );
-        if (msg != null) {
-          Navigator.of(context).push(
-            MaterialPageRoute(builder: (_) => DetailPage(state: s, message: msg)),
+      final match = s.messages.cast<NtfyMessage?>().firstWhere(
+            (m) => m?.id == pending,
+            orElse: () => null,
           );
+      if (match != null) {
+        s.consumeDeepLink();
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          Navigator.of(context).push(
+            MaterialPageRoute(builder: (_) => DetailPage(state: s, message: match)),
+          );
+        });
+      }
+      // match == null → 保留深链，等列表刷新后由下一次 build 重试
+      //
+      // 但如果轮询若干轮后仍找不到（消息已被清缓存、或消息不在本地库），
+      // 深链会一直挂着 —— 加个计数兜底，避免「永远转圈」。
+      else {
+        _missingDeepLinkRounds++;
+        if (_missingDeepLinkRounds == 6) {
+          // 约 30 秒（轮询 5 秒一次）仍找不到 → 放弃并提示
+          s.consumeDeepLink();
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('这条消息不在本地缓存里')),
+            );
+          });
         }
-      });
+      }
+    } else {
+      _missingDeepLinkRounds = 0;
     }
 
     return Scaffold(

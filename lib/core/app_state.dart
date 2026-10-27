@@ -63,8 +63,19 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  /// 深链待处理的消息 id（UI 取走后清空）
-  String? takePendingDeepLink() {
+  /// 深链待处理的消息 id
+  ///
+  /// **不能在消息还没加载时就取走** —— 冷启动点通知进来时，
+  /// 原生那边可能已经有消息了，但 Dart 侧的 refreshMessages 还没跑完，
+  /// 这时取走深链会导致「找不到对应消息 → 静默丢弃」，
+  /// 用户表现为「点了通知什么也没发生」。
+  ///
+  /// 所以这里只「窥视」不「消费」；真正的消费在 [consumeDeepLink]，
+  /// 由 UI 在确认消息已存在后才调用。
+  String? peekPendingDeepLink() => _pendingDeepLink;
+
+  /// 深链对应的消息 id（确认消息已加载后才取走）
+  String? consumeDeepLink() {
     final v = _pendingDeepLink;
     _pendingDeepLink = null;
     return v;

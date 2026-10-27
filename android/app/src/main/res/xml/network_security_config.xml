@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  明文 HTTP 策略。
+
+  为什么需要：Android 9 (API 28) 起默认禁止明文 HTTP（cleartext），
+  而 FxxkPush 连的是**用户自己填的** ntfy 服务器 —— 绝大多数自建 ntfy
+  实例走的是 http://IP:2586，没有 TLS。不放开的话 WebSocket 直接被拒：
+
+      CLEARTEXT communication to 185.170.211.110 not permitted by
+      network security policy
+
+  （这是模拟器实测抓到的 —— 真机同样必现，app 完全连不上。）
+
+  为什么不用全局 usesCleartextTraffic="true"：
+  那等于对所有域名放开明文，包括第三方请求。这里显式声明一份策略文件，
+  意图更清楚，也给以后收紧留口子。
+
+  如果用户填 https:// 地址，TLS 正常工作，不受这份配置影响。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system"/>
+            <certificates src="user"/>
+        </trust-anchors>
+    </base-config>
+</network-security-config>

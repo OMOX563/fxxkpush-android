@@ -100,6 +100,12 @@ class _SettingsPageState extends State<SettingsPage> {
                     'ntfy 服务所在地址，端口通常是 2586',
                     style: TextStyle(color: g.inkFaint, fontSize: 11.5),
                   ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '支持 http:// 与 https://。自建 ntfy 多数没有 TLS，'
+                    '用 http:// 时系统会放行明文连接。',
+                    style: TextStyle(color: g.inkFaint, fontSize: 11.5),
+                  ),
 
                   const SizedBox(height: 18),
                   _label(g, '访问令牌'),

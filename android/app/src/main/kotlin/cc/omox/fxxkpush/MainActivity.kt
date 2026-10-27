@@ -142,12 +142,23 @@ class MainActivity : FlutterActivity() {
         Thread {
             var ok = false
             try {
-                val json = JSONObject().apply { put("message", message) }
+                // ntfy 的 JSON 发布必须 POST 到**根路径**，topic 放 body 里。
+                //
+                // POST 到 "/$topic" + JSON body 时，ntfy 会把整个 body 当成
+                // message 的**纯文本**内容 —— 实测服务器上存下来的是：
+                //   message = "{\"message\":\"👍 [fp-phone] ...\"}"
+                // 而 title/priority/tags 全部丢失。
+                // 反过来 POST "/" + {"topic":..., "message":...} 才是对的：
+                //   title=FxxkPush 验证  priority=4  tags=["bell"]  全部正常。
+                val json = JSONObject().apply {
+                    put("topic", topic)
+                    put("message", message)
+                }
                 val body = json.toString()
                     .toRequestBody("application/json; charset=utf-8".toMediaType())
                 val b = baseUrl.trimEnd('/')
                 val req = Request.Builder()
-                    .url("$b/$topic")
+                    .url("$b/")
                     .post(body)
                     .apply { if (token.isNotEmpty()) header("Authorization", "Bearer $token") }
                     .build()

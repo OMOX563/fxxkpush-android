@@ -133,12 +133,19 @@ def _type_text(text):
 def _clear_field():
     """清空当前聚焦的输入框。
 
-    Ctrl+A 全选 + DEL 删除，比逐字符退格稳，也不依赖光标位置。
-    adb input keyevent 里 29 是 A（配 meta=CTRL_LEFT），67 是 DEL。
+    **不要用 Ctrl+A 全选** —— Flutter 的 TextField 对
+    `input keycombination 113 29`（CTRL_LEFT+A）的响应不稳定：
+    实测只删掉尾部 3 个字符，剩下的是追加，结果 "fp-phone" 变成
+    "fp-phfp-phone"。keycombination 还要 Android 11+ 才有。
+
+    可靠做法：MOVE_END（123）把光标挪到末尾，再连续 DEL（67）。
+    循环放在设备端跑，一次 adb 调用搞定，不占往返时间。
     """
-    sh(["shell", "input", "keyevent", "--longpress", "67"])
-    # 再用 ctrl+A + DEL 兜底，确保清干净
-    sh(["shell", "input", "keycombination", "113", "29"])
+    sh(["shell", "input", "keyevent", "123"])            # MOVE_END
+    # 一次 adb 调用里连删 60 次（足够覆盖 URL + 32 位 token）
+    sh(["shell", "for i in $(seq 1 60); do input keyevent 67; done"],
+       timeout=90)
+    # 再补一个普通 DEL，确保末尾真的被清掉
     sh(["shell", "input", "keyevent", "67"])
 
 
@@ -197,7 +204,16 @@ def configure_app(cfg):
     #   - 已配置过：AppBar 右侧齿轮，content-desc = "设置"
     #   - 未配置过：主页中间的「去设置」按钮
     # 只认前者会永远进不去设置页（实测踩过）。
-    sh(["shell", "am", "start", "-n", PKG + "/.MainActivity"])
+    # am start 重试 —— 系统刚就绪时第一次可能静默失败
+    for attempt in range(5):
+        rc0, out0 = sh(["shell", "am", "start", "-n", PKG + "/.MainActivity"], timeout=60)
+        if out0.strip():
+            print("  am start: %s" % out0.strip().splitlines()[-1][:120])
+        time.sleep(3)
+        if _app_running():
+            break
+        print("  am start 第 %d 次没起来，重试" % (attempt + 1))
+        time.sleep(4)
     edits = []
     for attempt in range(15):
         time.sleep(3)
@@ -221,7 +237,19 @@ def configure_app(cfg):
             _tap(1006, 202)     # 兜底坐标（AppBar 右侧齿轮）
             time.sleep(2)
     if len(edits) < 3:
-        print("  [跳过] 只找到 %d 个输入框，配置页结构可能变了" % len(edits))
+        print("  [失败] 只找到 %d 个输入框" % len(edits))
+        # 别让「app 根本没起来」伪装成「UI 结构变了」——
+        # 两者根因完全不同。先看进程在不在、崩没崩。
+        if not _app_running():
+            print("  app 进程不存在 —— 多半是装崩了（ABI 不匹配？）")
+            rc1, crash = sh(["logcat", "-d", "-t", "200"], timeout=90)
+            for l in crash.splitlines():
+                if "UnsatisfiedLinkError" in l or "FATAL EXCEPTION" in l \
+                   or "AndroidRuntime" in l and "Error" in l:
+                    print("    %s" % l.strip()[:160])
+                    break
+        else:
+            print("  app 在跑但没有输入框 —— 可能没进设置页，或 UI 结构变了")
         return False
 
     values = [base, token, topic]

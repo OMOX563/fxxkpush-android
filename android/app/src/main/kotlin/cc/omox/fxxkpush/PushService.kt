@@ -48,8 +48,50 @@ class PushService : Service() {
         @Volatile
         var instance: PushService? = null
 
+        /**
+         * Flutter 侧的事件通道 sink。
+         *
+         * MainActivity 在 EventChannel 的 onListen 里注册进来，
+         * 服务在**连接状态变化**时通过它推送。
+         */
         @Volatile
-        var connectionState: String = "disconnected"
+        var eventSink: io.flutter.plugin.common.EventChannel.EventSink? = null
+
+        /**
+         * 主线程 Handler。
+         *
+         * **EventSink.success() 必须在主线程调用** ——
+         * connectionState 是在 OkHttp 的 WebSocketListener 回调线程里改的
+         * （onOpen/onFailure 都是后台线程），直接 success() 会抛
+         * "Methods marked with @UiThread must be executed on the main thread"，
+         * 状态就推不出去，UI 只能等 Dart 那 5 秒轮询。
+         */
+        private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+        private var _connectionState = "disconnected"
+
+        /**
+         * 连接状态。
+         *
+         * **setter 里主动推事件** —— Dart 侧原来只能靠 5 秒轮询
+         * 才知道连上了，用户点「保存并连接」后要等好几秒小圆点才变绿。
+         * 推送之后是即时的；轮询只作兜底（服务在 app 不在前台时启动，
+         * 那时没有 sink，推不出去）。
+         */
+        var connectionState: String
+            get() = _connectionState
+            set(v) {
+                if (_connectionState == v) return
+                _connectionState = v
+                // 切回主线程再推 —— setter 可能在 OkHttp 回调线程被调用
+                mainHandler.post {
+                    try {
+                        eventSink?.success(mapOf("type" to "state", "value" to v))
+                    } catch (e: Exception) {
+                        Log.w(TAG, "emit state failed: ${e.message}")
+                    }
+                }
+            }
 
         private const val RECONNECT_BASE_MS = 1000L
         private const val RECONNECT_MAX_MS = 30000L

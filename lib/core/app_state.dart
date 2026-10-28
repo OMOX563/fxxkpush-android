@@ -53,6 +53,18 @@ class AppState extends ChangeNotifier {
 
   void _onNativeEvent(Map<String, dynamic> e) {
     final type = e['type'];
+
+    // 原生推来的连接状态变化（connecting / connected / error / disconnected）。
+    // 原生侧一改就推，所以小圆点立刻变色，不用等 5 秒轮询。
+    if (type == 'state') {
+      final v = e['value'] as String? ?? '';
+      if (v.isNotEmpty && v != _connState) {
+        _connState = v;
+        notifyListeners();
+      }
+      return;
+    }
+
     if (type == 'deeplink') {
       final v = e['value'] as String? ?? '';
       // 形如 "message/<id>"
@@ -134,13 +146,20 @@ class AppState extends ChangeNotifier {
   /// 启动/重启前台服务（订阅）
   Future<bool> startService() async {
     if (!_config.isConfigured) return false;
+    // 先置 connecting 再 await —— native 的 startService 返回时
+    // WebSocket 可能已经连上了，状态会由原生推过来。
+    // 反过来写（await 之后才置）会让 UI 闪一下「已连接」再退回「连接中」。
+    _connState = 'connecting';
+    notifyListeners();
     final ok = await NativeBridge.startService(
       baseUrl: _config.baseUrl,
       token: _config.token,
       topic: _config.topic,
     );
-    _connState = 'connecting';
-    notifyListeners();
+    if (!ok) {
+      _connState = 'error';
+      notifyListeners();
+    }
     return ok;
   }
 

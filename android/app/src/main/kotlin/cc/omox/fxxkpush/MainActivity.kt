@@ -53,15 +53,23 @@ class MainActivity : FlutterActivity() {
             .setStreamHandler(object : EventChannel.StreamHandler {
                 override fun onListen(arguments: Any?, sink: EventChannel.EventSink) {
                     eventSink = sink
+                    // 也交给 PushService —— 服务在连接状态变化时
+                    // （connecting → connected → error）主动推给 Dart，
+                    // 不用等 Dart 那 5 秒轮询。
+                    PushService.eventSink = sink
                     // 有 pending 深链就先补发
                     pendingDeepLink?.let {
                         sink.success(mapOf("type" to "deeplink", "value" to it))
                         pendingDeepLink = null
                     }
+                    // 补一个当前状态，免得 Dart 得等下一次轮询才知道
+                    sink.success(mapOf("type" to "state",
+                                       "value" to PushService.connectionState))
                 }
 
                 override fun onCancel(arguments: Any?) {
                     eventSink = null
+                    PushService.eventSink = null
                 }
             })
     }

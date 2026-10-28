@@ -39,6 +39,23 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APK="${1:-$REPO_ROOT/build/app/outputs/flutter-apk/app-release.apk}"
 LOG="$TMP/emulator.log"
 
+
+
+# ---- ABI 守卫 ------------------------------------------------------------
+# 装错 ABI 的包 → UnsatisfiedLinkError: libflutter.so is for EM_AARCH64
+# instead of EM_X86_64（模拟器是 x86_64，手机是 arm64）。
+# 交付给手机的包是 arm64-only，直接装到模拟器上必崩，
+# 症状是「app 没起来 / 前台服务没跑」，但根因跟 app 逻辑无关 ——
+# 别去查代码，先查 ABI。
+APK_ABI="$(unzip -l "$APK" 2>/dev/null | awk '/lib\/.*\.so$/ {split($4,a,"/"); print a[2]}' | sort -u | tr '\n' ',')"
+say "APK ABI: ${APK_ABI:-未知}"
+case "$APK_ABI" in
+  *x86_64*)  say "  → 含 x86_64，模拟器可跑" ;;
+  *)         say "  → **不含 x86_64**，装到 x86_64 模拟器上会 UnsatisfiedLinkError 崩溃！"
+             say "     重建成 fat 包： flutter build apk --release --target-platform android-arm64,android-x64"
+             exit 2 ;;
+esac
+
 say() { echo "[$(date +%H:%M:%S)] $*"; }
 
 # 模拟器跑在宿主机的 10.0.2.2 后面（模拟器自己的 127.0.0.1 是模拟器内部）。
@@ -75,7 +92,7 @@ rm -f "$HOME/.android/avd/fp_test.avd/"*.lock 2>/dev/null
 # ---------- 启动模拟器（脚本子进程，全程存活） ----------
 say "启动模拟器"
 "$EMU" -avd fp_test -no-window -no-audio -no-boot-anim \
-       -gpu swiftshader_indirect -no-snapshot -memory 3072 -cores 4 \
+       -gpu swiftshader_indirect -no-snapshot -memory 2048 -cores 4 \
        > "$LOG" 2>&1 &
 EMU_PID=$!
 say "emu pid=$EMU_PID"
@@ -110,6 +127,12 @@ for i in $(seq 1 40); do
   sleep 5
 done
 [ "$SYSREADY" = "1" ] || { echo "系统服务未就绪，$S"; exit 1; }
+
+# 再静置一会儿。system_server 在册 ≠ 能正常起 app：
+# 实测 boot_completed=1 后立刻 am start，app 会静默起不来
+# （症状是「装好了但进程不在」，看着像 ABI 不匹配，其实是系统没稳）。
+say "静置 25s 让系统彻底就绪"
+sleep 25
 
 # ---------- 端到端验证（装包 + 填配置 + 发消息 + 校验） ----------
 say "跑端到端验证"

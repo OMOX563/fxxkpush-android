@@ -86,14 +86,43 @@ trap cleanup EXIT
 # ---------- 清场：上一轮的残留必须杀干净 ----------
 say "清场"
 cleanup >/dev/null 2>&1
+
+# **必须杀光所有 qemu 进程，不只是解 AVD 锁。**
+# 两个模拟器实例并发会直接把本机搞蓝屏：
+#   2026-10-28 13:03 脚本起了一个，13:11 又手动起了第二个（同一个 AVD），
+#   13:14:32 系统挂死 → 13:18:54 BugCheck 0x116 VIDEO_TDR_ERROR
+#   （两个 SwiftShader/ANGLE 管线同时压 AMD Radeon 780M 核显 → 驱动超时）。
+#   蓝屏恢复时扩展坞上的 USB 设备（VID_27C6&PID_609A）驱动初始化失败，
+#   网卡跟着一起死。
+#
+# 真正的模拟器进程是 qemu-system-x86_64-headless，emulator.exe 只是启动器；
+# 只杀 emulator.exe 会留下真身占着 AVD。
+say "杀掉残留的 qemu 实例"
+taskkill //F //IM qemu-system-x86_64-headless.exe >/dev/null 2>&1
+taskkill //F //IM emulator.exe >/dev/null 2>&1
+sleep 3
+
+# 确认真的没有残留了再往下走 —— 有残留就退，别硬来。
+LEFT=$(tasklist //FI "IMAGENAME eq qemu-system-x86_64-headless.exe" 2>/dev/null | grep -ci qemu || true)
+if [ "${LEFT:-0}" -gt 0 ]; then
+  say "仍有 $LEFT 个 qemu 进程未退出，放弃本轮（并发模拟器=蓝屏风险）"
+  exit 3
+fi
+
 rm -f "$HOME/.android/avd/fp_test.avd/"*.lock 2>/dev/null
 "$ADB" kill-server >/dev/null 2>&1
 "$ADB" start-server >/dev/null 2>&1
 
 # ---------- 启动模拟器（脚本子进程，全程存活） ----------
+# 【GPU】-gpu off：让模拟器完全不碰宿主显卡，纯 CPU 渲染。
+#   -gpu swiftshader_indirect 仍然是走宿主 GPU 的 ANGLE 管线，
+#   实测并发两个实例就把 AMD Radeon 780M 驱动打到 TDR（蓝屏 0x116）。
+#   代价是渲染慢一些（截图/动画），但对「装包 → 填配置 → 收推送 → 点通知」
+#   这种验证完全够用 —— 不碰宿主 GPU 就不会因为 GPU 负载把整机带崩。
 say "启动模拟器"
+
 "$EMU" -avd fp_test -no-window -no-audio -no-boot-anim \
-       -gpu swiftshader_indirect -no-snapshot -memory 2048 -cores 2   # cores 4 + memory 2048 会让 qemu 直接 segfault（实测） \
+       -gpu off -no-snapshot -memory 1536 -cores 2   # 见下方 GPU 说明 \
        > "$LOG" 2>&1 &
 EMU_PID=$!
 say "emu pid=$EMU_PID"

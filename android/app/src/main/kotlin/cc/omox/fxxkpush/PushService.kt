@@ -101,6 +101,29 @@ class PushService : Service() {
     private var socket: WebSocket? = null
     private var reconnectDelay = RECONNECT_BASE_MS
 
+    /**
+     * 连接代数（epoch）。
+     *
+     * **每次 connect() 自增**，用来识别「过期」的 WebSocket 回调。
+     *
+     * 为什么需要：OkHttp 的 `WebSocket.cancel()` **会触发**旧 socket 的
+     * `onFailure`/`onClosed` 回调。而这两个回调里都会 `scheduleReconnect()`。
+     * 于是形成自激循环：
+     *
+     *   connect() → socket.cancel() 旧 socket
+     *             → 旧 socket 的 onClosed 触发 → scheduleReconnect() 排重连
+     *             → 重连到点 → connect() → 又 cancel（这次是刚连上的好连接）
+     *             → 循环往复
+     *
+     * 表现就是「连接→断开→再连接→再断开」无限循环，而且每次都把
+     * **刚建立的正常连接** cancel 掉。
+     *
+     * 回调里比对 epoch，不等于当前值的直接忽略 —— 那是「我们主动取消的
+     * 旧连接」，不是故障，不该重连。
+     */
+    @Volatile
+    private var connectionEpoch = 0
+
     /** 待执行的重连任务。必须持有句柄 ——
      *  否则每次失败都 post 一个新 Runnable 而旧的还在队列里，
      *  失败几次就有几个重连同时触发 → 连接风暴。 */
@@ -131,14 +154,31 @@ class PushService : Service() {
             return START_NOT_STICKY
         }
 
-        baseUrl = intent?.getStringExtra("baseUrl") ?: baseUrl
-        token = intent?.getStringExtra("token") ?: token
-        topic = intent?.getStringExtra("topic") ?: topic
+        // 先记下「配置变没变」，再覆盖字段
+        val newBase = intent?.getStringExtra("baseUrl")
+        val newToken = intent?.getStringExtra("token")
+        val newTopic = intent?.getStringExtra("topic")
+        val configChanged = (newBase != null && newBase != baseUrl) ||
+            (newToken != null && newToken != token) ||
+            (newTopic != null && newTopic != topic)
+        baseUrl = newBase ?: baseUrl
+        token = newToken ?: token
+        topic = newTopic ?: topic
 
         Notifier.ensureChannels(this)
         startForegroundCompat()
 
         acquireWakeLock()
+
+        // 配置没变且连接还活着 → 不用重建连接。
+        // 重建就意味着 cancel 旧 socket 再建新的 —— 功能上没问题（epoch 守卫
+        // 已经保证不会误触发重连），但白白断一次重连，用户会看到
+        // 「已连接」闪一下变「连接中」。
+        if (!configChanged && connectionState == "connected" && socket != null) {
+            Log.i(TAG, "config unchanged and already connected, skip reconnect")
+            return START_STICKY
+        }
+
         connect()
 
         // START_STICKY：进程被杀后系统会重新拉起（intent 为 null，用已有配置）
@@ -240,6 +280,8 @@ class PushService : Service() {
             connectionState = "disconnected"
             return
         }
+        // 自增代数：本轮创建的 socket 及其回调，只有代数匹配才算数
+        val epoch = ++connectionEpoch
         connectionState = "connecting"
         updateStatusNotification()
 
@@ -272,9 +314,17 @@ class PushService : Service() {
         socket = c.newWebSocket(req, object : WebSocketListener() {
 
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.i(TAG, "ws connected: ${wsUrl()}")
+                if (epoch != connectionEpoch) {
+                    Log.i(TAG, "ws open but stale (epoch=$epoch vs $connectionEpoch), ignore")
+                    return
+                }
+                Log.i(TAG, "ws connected: ${wsUrl()} (epoch=$epoch)")
                 connectionState = "connected"
                 reconnectDelay = RECONNECT_BASE_MS
+                // **连接成功了就把排队的重连撤掉** ——
+                // 不撤的话，之前某次失败排下的重连到点后照样 connect()，
+                // 把这个刚建好的连接 cancel 掉，然后进入无限循环。
+                android.os.Handler(mainLooper).removeCallbacks(reconnectRunnable)
                 updateStatusNotification()
                 tryWhitelistDoze()
             }
@@ -284,19 +334,32 @@ class PushService : Service() {
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                if (epoch != connectionEpoch) {
+                    Log.i(TAG, "ws closing ignored (stale epoch=$epoch): $code $reason")
+                    return
+                }
                 Log.i(TAG, "ws closing: $code $reason")
                 webSocket.close(1000, null)
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                Log.i(TAG, "ws closed: $code $reason")
+                if (epoch != connectionEpoch) {
+                    Log.i(TAG, "ws closed ignored (stale epoch=$epoch): $code $reason")
+                    return
+                }
+                Log.i(TAG, "ws closed (epoch=$epoch): $code $reason")
                 connectionState = "disconnected"
                 updateStatusNotification()
                 scheduleReconnect()
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.w(TAG, "ws failure: ${t.message}")
+                if (epoch != connectionEpoch) {
+                    // 我们自己 cancel 掉的旧连接 —— 不是故障，别重连
+                    Log.i(TAG, "ws failure ignored (stale epoch=$epoch): ${t.message}")
+                    return
+                }
+                Log.w(TAG, "ws failure (epoch=$epoch): ${t.message}")
                 connectionState = "error"
                 updateStatusNotification()
                 scheduleReconnect()
@@ -313,6 +376,7 @@ class PushService : Service() {
         // 每次又各自再排一个 → 指数级连接风暴。
         handler.removeCallbacks(reconnectRunnable)
         handler.postDelayed(reconnectRunnable, delay)
+        Log.i(TAG, "reconnect scheduled in ${delay}ms")
     }
 
     private fun handleMessage(text: String) {

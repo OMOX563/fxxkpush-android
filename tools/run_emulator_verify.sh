@@ -41,6 +41,8 @@ LOG="$TMP/emulator.log"
 
 
 
+say() { echo "[$(date +%H:%M:%S)] $*"; }
+
 # ---- ABI 守卫 ------------------------------------------------------------
 # 装错 ABI 的包 → UnsatisfiedLinkError: libflutter.so is for EM_AARCH64
 # instead of EM_X86_64（模拟器是 x86_64，手机是 arm64）。
@@ -56,7 +58,6 @@ case "$APK_ABI" in
              exit 2 ;;
 esac
 
-say() { echo "[$(date +%H:%M:%S)] $*"; }
 
 # 模拟器跑在宿主机的 10.0.2.2 后面（模拟器自己的 127.0.0.1 是模拟器内部）。
 # 若 FP_NTFY_URL 指向 127.0.0.1，模拟器连的是它自己，必然连不上。
@@ -92,7 +93,7 @@ rm -f "$HOME/.android/avd/fp_test.avd/"*.lock 2>/dev/null
 # ---------- 启动模拟器（脚本子进程，全程存活） ----------
 say "启动模拟器"
 "$EMU" -avd fp_test -no-window -no-audio -no-boot-anim \
-       -gpu swiftshader_indirect -no-snapshot -memory 2048 -cores 4 \
+       -gpu swiftshader_indirect -no-snapshot -memory 2048 -cores 2   # cores 4 + memory 2048 会让 qemu 直接 segfault（实测） \
        > "$LOG" 2>&1 &
 EMU_PID=$!
 say "emu pid=$EMU_PID"

@@ -28,6 +28,14 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   void initState() {
     super.initState();
+    // 订阅 AppState —— **不订阅的话这一页永远是 stale 的**。
+    //
+    // 症状：用户点「保存并连接」，WebSocket 其实连上了（通知能收到），
+    // 但页面上的「连接状态」一直显示「连接中」——
+    // AppState.notifyListeners() 只通知注册过的 listener，
+    // 这一页没注册就永远不重建。
+    // （home_page 有注册，所以主页的小圆点是对的，只有设置页不对。）
+    widget.state.addListener(_onStateChanged);
     final c = widget.state.config;
     _url = TextEditingController(text: c.baseUrl);
     _token = TextEditingController(text: c.token);
@@ -36,10 +44,16 @@ class _SettingsPageState extends State<SettingsPage> {
 
   @override
   void dispose() {
+    widget.state.removeListener(_onStateChanged);
     _url.dispose();
     _token.dispose();
     _topic.dispose();
     super.dispose();
+  }
+
+  /// AppState 变化 → 重建本页（连接状态、按钮态等）
+  void _onStateChanged() {
+    if (mounted) setState(() {});
   }
 
   Future<void> _save() async {

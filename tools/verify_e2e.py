@@ -397,6 +397,57 @@ def check_receive(cfg, timeout=45):
                  "等待 %ds" % timeout if not got_log else "")
 
 
+def check_store_rooted():
+    """**权威断言**：用 root 直读 sqlite，确认消息真的留在库里。
+
+    模拟器可以 `adb root`，所以 release 包也能读库 ——
+    这比 UI 语义树可靠得多（UI 断言会因为路由/可见性/滚动位置而假阴性）。
+
+    注意 adb shell 会剥掉引号，SQL 必须作为**整条命令的一个参数**传，
+    否则 `select count(*) from messages` 会被 shell 拆开报
+    「syntax error: unexpected '('」。
+
+    这条断言存在的原因：原版的 check_receive 只看 logcat 的
+    "message stored+notified"，而那行日志是在 store.upsert() **之后**打印的 ——
+    消息一插入就被 purgeExpired 删掉时，日志照样打。
+    「消息入库即被删」那个 bug 就是这样在 e2e 全绿的情况下溜过去的。
+    """
+    rc, _ = sh(["root"], timeout=60)
+    time.sleep(3)
+    DB = "/data/data/cc.omox.fxxkpush/databases/fxxkpush.db"
+    out = sh(["shell", "sqlite3 %s \"select count(*) from messages;\"" % DB], timeout=90)[1]
+    n = out.strip().splitlines()[-1].strip() if out.strip() else "?"
+    ok = n.isdigit() and int(n) > 0
+    detail = "共 %s 条" % n
+    if not ok:
+        # 顺便把时间戳量级打出来 —— 单位错位的话这里一眼能看出来
+        rows = sh(["shell",
+                   "sqlite3 %s \"select id, time, length(time) from messages order by time desc limit 3;\"" % DB],
+                  timeout=90)[1]
+        detail += " | " + rows.strip().replace("\n", " / ")[:160]
+    return check("消息真留在 sqlite 里（root 直读）", ok, detail)
+
+
+def _go_home():
+    """回到消息列表页。
+
+    设置页是 Flutter Navigator push 上去的，`am start` 只会把 Activity
+    带到前台，**不会把设置页 pop 掉** —— 消息列表根本不在语义树里，
+    断言必然假阴性。所以：如果当前在设置页（语义树里有「服务器地址」），
+    就按 BACK 键 pop 回主页。
+
+    注意不能无脑 BACK：本来就在主页时 BACK 会直接退出 app。
+    """
+    sh(["shell", "am", "start", "-n", PKG + "/.MainActivity"], timeout=60)
+    time.sleep(2)
+    nodes = _dump_nodes()
+    blob = " ".join((n[1] or "") + " " + (n[2] or "") for n in nodes)
+    if "服务器地址" in blob or "保存并连接" in blob:
+        sh(["shell", "input", "keyevent", "4"], timeout=30)   # BACK
+        time.sleep(2)
+    return True
+
+
 def check_message_in_list(wait=40):
     """消息有没有真的出现在 app 的消息列表里。
 
@@ -411,9 +462,8 @@ def check_message_in_list(wait=40):
     两段。Flutter 的语义节点能通过 uiautomator dump 读到（脚本本来就在用它
     找「保存并连接」按钮），所以这条路是通的。
     """
-    # 确保 app 在前台（否则列表根本不在语义树里）
-    sh(["shell", "am", "start", "-n", PKG + "/.MainActivity"], timeout=60)
-    time.sleep(2)
+    # 先回到消息列表页（设置页还在的话，列表不在语义树里）
+    _go_home()
 
     deadline = time.time() + wait
     found = False
@@ -524,6 +574,7 @@ def main():
         check_receive(cfg)
         check_store(cfg)
         check_notification()
+        check_store_rooted()
         check_message_in_list()
 
     print("\n--- 深链 ---")

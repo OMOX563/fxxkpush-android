@@ -34,13 +34,28 @@ import urllib.request
 PKG = "cc.omox.fxxkpush"
 ACTIVITY = f"{PKG}/.MainActivity"
 def _find_adb():
-    """找 adb：优先 ANDROID_HOME/platform-tools，其次 PATH。"""
-    sdk = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
-    if sdk:
-        p = os.path.join(sdk, "platform-tools", "adb.exe")
+    """找 adb：优先 ANDROID_HOME/platform-tools，其次 PATH。
+
+    注意：ANDROID_HOME 存在但里面没有 platform-tools 时要继续往下找，
+    不能直接 fallback 成裸 "adb" —— PATH 里通常没有 adb，
+    会让所有检查报 "adb not found"（实测踩过）。
+    """
+    cands = []
+    for var in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
+        sdk = os.environ.get(var)
+        if sdk:
+            cands.append(os.path.join(sdk, "platform-tools", "adb.exe"))
+    # 本机默认 SDK 位置（Windows 上的标准安装路径）
+    local = os.path.expandvars(r"%LOCALAPPDATA%\Android\Sdk")
+    cands.append(os.path.join(local, "platform-tools", "adb.exe"))
+    cands.append(os.path.join(local, "platform-tools", "adb"))
+    for p in cands:
         if os.path.exists(p):
             return p
-    return "adb"
+    # 最后退到 PATH 里的 adb
+    from shutil import which
+    w = which("adb")
+    return w or "adb"
 
 
 ADB = _find_adb()
@@ -50,9 +65,26 @@ GREEN, RED, YELLOW, RESET = "\033[32m", "\033[31m", "\033[33m", "\033[0m"
 results = []
 
 
+def _winpath(p):
+    """把 MSYS 风格路径转成原生 Windows 路径。
+
+    adb.exe 是原生 Windows 程序，不认 /c/Users/... 这种路径，
+    会报 "failed to stat /c/...: No such file or directory"。
+    """
+    if not p:
+        return p
+    p = str(p)
+    if len(p) > 2 and p[1] == ":" and p[2] in ("\\", "/"):
+        return p.replace("/", "\\")
+    if p.startswith("/c/") or p.startswith("/C/"):
+        return "C:\\" + p[3:].replace("/", "\\")
+    return p
+
+
 def sh(args, timeout=60, use_adb=True):
     """跑一条命令，返回 (rc, stdout+stderr)。"""
     cmd = ([ADB] + args) if use_adb else args
+    cmd = [_winpath(a) for a in cmd]
     try:
         p = subprocess.run(cmd, capture_output=True, timeout=timeout,
                            encoding="utf-8", errors="replace")
@@ -133,6 +165,12 @@ def _center(b):
     return (x1 + x2) // 2, (y1 + y2) // 2
 
 
+def _app_running():
+    """app 进程是否活着。"""
+    rc, out = sh(["shell", "pidof", PKG], timeout=30)
+    return any(x.isdigit() for x in out.split())
+
+
 def configure_app(cfg):
     """用 UI 自动化把「服务器地址 / token / 话题」填进设置页。
 
@@ -168,6 +206,11 @@ def configure_app(cfg):
         if len(edits) >= 3:
             print("  设置页已就绪（第 %d 次探测）" % (attempt + 1))
             break
+        # app 可能根本没起来（系统没就绪时 am start 报
+        # "Can't find service: activity"，这里必须重试启动）
+        if not _app_running():
+            sh(["shell", "am", "start", "-n", PKG + "/.MainActivity"])
+            time.sleep(2)
         entry = next((n for n in nodes
                       if n[0] == "android.widget.Button"
                       and (n[1] in ("设置", "去设置") or n[2] in ("设置", "去设置"))), None)
@@ -257,12 +300,26 @@ def check_ws_connected():
                  ("失败原因: %s" % err[-1][:60]) if err and not connected else "")
 
 
-def check_ui_connection_state():
-    """设置页上显示的连接状态 —— 用户实际看到的东西。"""
-    nodes = _dump_nodes()
-    blob = " ".join((n[1] or "") + " " + (n[2] or "") for n in nodes)
-    m = re.search(r"连接状态\s*(\S+)", blob)
-    state = m.group(1) if m else "?"
+def check_ui_connection_state(wait=30):
+    """设置页上显示的连接状态 —— 用户实际看到的东西。
+
+    注意：Flutter 的 content-desc 里换行是 HTML 实体 &#10;，
+    直接正则匹配会连着换行符一起吃进结果里。
+
+    状态是异步刷新的，刚点完「保存并连接」时可能还显示「连接中」，
+    所以轮询等它稳定。
+    """
+    state = "?"
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        nodes = _dump_nodes()
+        blob = " ".join((n[1] or "") + " " + (n[2] or "") for n in nodes)
+        blob = blob.replace("&#10;", " ").replace("\n", " ")
+        m = re.search(r"连接状态\s*(\S+)", blob)
+        state = m.group(1) if m else "?"
+        if state == "已连接":
+            break
+        time.sleep(3)
     ok = state == "已连接"
     return check("UI 连接状态显示「已连接」", ok, "实际: %s" % state)
 
@@ -357,6 +414,8 @@ def main():
     ap.add_argument("--send", action="store_true", help="发一条测试消息")
     ap.add_argument("--adb", help="指定设备 serial")
     ap.add_argument("--install", metavar="APK", help="先装这个 APK")
+    ap.add_argument("--fresh", action="store_true",
+                    help="装之前先卸载（验证全新安装 → 首次配置路径）")
     ap.add_argument("--configure", action="store_true",
                     help="用 UI 自动化把服务器配置填进去")
     args = ap.parse_args()
@@ -366,11 +425,17 @@ def main():
 
     if args.install:
         print("\n--- 安装 APK ---")
-        rc, out = sh(["install", "-r", args.install], timeout=300)
+        # 端到端要验证「全新安装 → 首次配置」这条路径，
+        # 所以先卸载（-r 覆盖安装会保留上次的 SharedPreferences 配置）。
+        if args.fresh:
+            sh(["uninstall", PKG], timeout=120)
+        rc, out = sh(["install"] + ([] if args.fresh else ["-r"]) + [args.install],
+                      timeout=300)
         print("  " + out.strip().splitlines()[-1] if out.strip() else "  (无输出)")
         if "Success" not in out:
             print("  安装失败，先解决这个")
             return 2
+        sh(["logcat", "-c"], timeout=60)
 
     print("=" * 62)
     print("  FxxkPush Android 端到端验证")

@@ -29,6 +29,9 @@ android {
         versionCode = flutter.versionCode
         versionName = flutter.versionName
 
+        // instrumentation 测试（androidTest/）跑在真机/模拟器上
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
         // 只打 arm64-v8a —— 目标机型（用户手机）是 arm64。
         // Flutter 引擎每个 ABI 一份，debug 构建实测：
         //   arm64-v8a 51.7MB + x86_64 38.3MB + armeabi-v7a 31.7MB = 121.7MB
@@ -89,4 +92,9 @@ flutter {
 dependencies {
     // 原生侧 WebSocket（前台服务持有长连）
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // instrumentation 测试
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test:rules:1.6.1")
 }

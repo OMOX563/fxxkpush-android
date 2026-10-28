@@ -90,6 +90,12 @@ class AppState extends ChangeNotifier {
   }
 
   /// 拉取原生缓存的消息
+  /// 拉取原生缓存的消息。
+  ///
+  /// **只在内容真的变了才 notifyListeners()** ——
+  /// 轮询每 5 秒调一次，无条件通知会让整个列表 UI 每 5 秒重建一次
+  /// （消息多时列表会闪、会卡）。用「id 序列是否相同」判断有没有新内容：
+  /// ntfy 的消息按时间倒序返回，最新在前，所以只要第一条 id 变了就是有新消息。
   Future<void> refreshMessages({bool silent = false}) async {
     final list = await NativeBridge.fetchMessages();
     if (list.isEmpty && _messages.isEmpty) {
@@ -98,8 +104,21 @@ class AppState extends ChangeNotifier {
       }
       return;
     }
+    if (_sameMessages(list)) {
+      // 内容没变 —— 静默返回，不打扰 UI
+      return;
+    }
     _messages = list;
     notifyListeners();
+  }
+
+  /// 判断两份消息列表内容是否一致（按 id 序列比）
+  bool _sameMessages(List<NtfyMessage> next) {
+    if (next.length != _messages.length) return false;
+    for (var i = 0; i < next.length; i++) {
+      if (next[i].id != _messages[i].id) return false;
+    }
+    return true;
   }
 
   /// 保存配置（并按需重启订阅）

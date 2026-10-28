@@ -58,6 +58,11 @@ class PushService : Service() {
     private var client: OkHttpClient? = null
     private var socket: WebSocket? = null
     private var reconnectDelay = RECONNECT_BASE_MS
+
+    /** 待执行的重连任务。必须持有句柄 ——
+     *  否则每次失败都 post 一个新 Runnable 而旧的还在队列里，
+     *  失败几次就有几个重连同时触发 → 连接风暴。 */
+    private val reconnectRunnable = Runnable { if (instance != null) connect() }
     private var wakeLock: PowerManager.WakeLock? = null
 
     private var baseUrl = ""
@@ -156,10 +161,17 @@ class PushService : Service() {
 
     private fun acquireWakeLock() {
         try {
+            // 先释放旧的 ——
+            // onStartCommand 会被重复调用（每次「保存并连接」一次），
+            // 直接 new 一个覆盖字段的话旧锁永远不 release → wakelock 泄漏。
+            releaseWakeLock()
             val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
             wakeLock = pm.newWakeLock(
                 PowerManager.PARTIAL_WAKE_LOCK, "FxxkPush::push"
-            ).apply { acquire() }
+            ).apply {
+                setReferenceCounted(false)
+                acquire()
+            }
         } catch (e: Exception) {
             Log.w(TAG, "wakeLock failed: ${e.message}")
         }
@@ -189,8 +201,14 @@ class PushService : Service() {
         connectionState = "connecting"
         updateStatusNotification()
 
+        // 先把旧连接彻底断掉 ——
+        // onStartCommand 可能被重复调用（用户反复点「保存并连接」），
+        // 不 cancel 旧 socket 就会有两个 WebSocket 同时活着、同时收消息。
         try {
+            socket?.cancel()
+            socket = null
             client?.dispatcher?.executorService?.shutdown()
+            client = null
         } catch (_: Exception) {
         }
 
@@ -247,9 +265,12 @@ class PushService : Service() {
     private fun scheduleReconnect() {
         val delay = reconnectDelay
         reconnectDelay = (reconnectDelay * 2).coerceAtMost(RECONNECT_MAX_MS)
-        android.os.Handler(mainLooper).postDelayed({
-            if (instance != null) connect()
-        }, delay)
+        val handler = android.os.Handler(mainLooper)
+        // 先撤掉排队的那个 —— 只有**一个**重连在排队。
+        // 不撤的话失败 N 次就有 N 个重连 Runnable 同时到点，
+        // 每次又各自再排一个 → 指数级连接风暴。
+        handler.removeCallbacks(reconnectRunnable)
+        handler.postDelayed(reconnectRunnable, delay)
     }
 
     private fun handleMessage(text: String) {
@@ -285,12 +306,21 @@ class PushService : Service() {
     override fun onDestroy() {
         Log.i(TAG, "onDestroy")
         connectionState = "disconnected"
+        // 别让排队的重连在服务死后又跑起来
+        android.os.Handler(mainLooper).removeCallbacks(reconnectRunnable)
         try {
-            socket?.close(1000, null)
+            socket?.cancel()
+            socket = null
         } catch (_: Exception) {
         }
+        // 先把旧连接彻底断掉 ——
+        // onStartCommand 可能被重复调用（用户反复点「保存并连接」），
+        // 不 cancel 旧 socket 就会有两个 WebSocket 同时活着、同时收消息。
         try {
+            socket?.cancel()
+            socket = null
             client?.dispatcher?.executorService?.shutdown()
+            client = null
         } catch (_: Exception) {
         }
         releaseWakeLock()

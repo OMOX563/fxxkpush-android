@@ -95,11 +95,22 @@ class PushService : Service() {
 
         private const val RECONNECT_BASE_MS = 1000L
         private const val RECONNECT_MAX_MS = 30000L
+
+        /**
+         * 连接「稳定保持」多久才算真恢复。
+         *
+         * 只有稳定到这个时长，重连退避才从头开始（1 秒）。
+         * 连上 0.5 秒就断的话不算恢复 —— 那属于故障，退避必须继续翻倍。
+         */
+        private const val STABLE_CONNECTION_MS = 60_000L
     }
 
     private var client: OkHttpClient? = null
     private var socket: WebSocket? = null
     private var reconnectDelay = RECONNECT_BASE_MS
+
+    /** 本次连接建立的时刻（epoch 毫秒），用来判断它有没有稳定住 */
+    private var connectedAtMs = 0L
 
     /**
      * 连接代数（epoch）。
@@ -320,7 +331,16 @@ class PushService : Service() {
                 }
                 Log.i(TAG, "ws connected: ${wsUrl()} (epoch=$epoch)")
                 connectionState = "connected"
-                reconnectDelay = RECONNECT_BASE_MS
+                // **这里不重置重连退避。**
+                //
+                // 连上 ≠ 恢复。如果连上 0.5 秒又被服务端断开（限流 429、
+                // 服务端主动断链），在这里把退避重置回 1 秒，就变成了
+                // 「连上 → 断 → 1 秒后重连 → 连上 → 又重置」的 1 秒死循环，
+                // 把服务端打到 429，越打越死。
+                //
+                // 退避的重置交给 [scheduleReconnect]：只有这次连接稳定保持
+                // 超过 STABLE_CONNECTION_MS，才算真恢复，才从头开始。
+                connectedAtMs = System.currentTimeMillis()
                 // **连接成功了就把排队的重连撤掉** ——
                 // 不撤的话，之前某次失败排下的重连到点后照样 connect()，
                 // 把这个刚建好的连接 cancel 掉，然后进入无限循环。
@@ -368,6 +388,16 @@ class PushService : Service() {
     }
 
     private fun scheduleReconnect() {
+        // 这次连接活了多久？
+        val uptimeMs = if (connectedAtMs > 0) System.currentTimeMillis() - connectedAtMs else 0L
+        if (uptimeMs >= STABLE_CONNECTION_MS) {
+            // 稳定住了 → 算真恢复，退避从头开始
+            reconnectDelay = RECONNECT_BASE_MS
+            Log.i(TAG, "connection was stable ${uptimeMs}ms, reset backoff")
+        } else {
+            // 刚连上就断 → 故障，退避继续翻倍，别从头来
+            Log.w(TAG, "connection unstable (uptime=${uptimeMs}ms), keeping backoff")
+        }
         val delay = reconnectDelay
         reconnectDelay = (reconnectDelay * 2).coerceAtMost(RECONNECT_MAX_MS)
         val handler = android.os.Handler(mainLooper)
@@ -383,8 +413,10 @@ class PushService : Service() {
         try {
             val jo = JSONObject(text)
             val event = jo.optString("event", "")
-            // keepalive / poll_request 是协议控制帧，不落地
-            if (event != "message" && event != "open") return
+            // keepalive / poll_request/open 都是协议控制帧，**不落地**。
+            // 注意 open 帧是带 id 的（ntfy 2.x：`{"event":"open","id":"..."}`），
+            // 以前把它当消息存了，于是库里混进一堆标题正文全空的假消息。
+            if (event != "message") return
 
             val id = jo.optString("id", "")
             if (id.isEmpty()) return

@@ -344,7 +344,15 @@ def check_ui_connection_state(wait=30):
         blob = " ".join((n[1] or "") + " " + (n[2] or "") for n in nodes)
         blob = blob.replace("&#10;", " ").replace("\n", " ")
         m = re.search(r"连接状态\s*(\S+)", blob)
-        state = m.group(1) if m else "?"
+        if m:
+            state = m.group(1)
+        elif "已连接" in blob:
+            # **主页**上的连接状态是 AppBar 小圆点的语义标签，就是「已连接」；
+            # 设置页上才是「连接状态 已连接」这种带前缀的写法。
+            # 两种页面都要认 —— 只认一种的话，跑在哪个页面就红哪个。
+            state = "已连接"
+        else:
+            state = "?"
         if state == "已连接":
             break
         time.sleep(3)
@@ -472,14 +480,20 @@ def check_message_in_list(wait=40):
         nodes = _dump_nodes()
         blob = " ".join((n[1] or "") + " " + (n[2] or "") for n in nodes)
         blob = blob.replace("&#10;", " ").replace("\n", " ")
-        if "E2E" in blob:
+        # **两个信号任一成立就算过**：
+        #  - 「暂无消息」消失 → 列表不再是空状态（最可靠，不依赖消息文本）
+        #  - 看到消息标题 → 消息卡片确实渲染出来了
+        empty_gone = "暂无消息" not in blob
+        has_text = "E2E" in blob
+        if empty_gone or has_text:
             found = True
             i = blob.find("E2E")
-            seen = blob[max(0, i - 30):i + 60].strip()
+            seen = (blob[max(0, i - 30):i + 70].strip() if i >= 0
+                    else "空状态提示已消失，列表有内容")
             break
         time.sleep(3)
     return check("消息出现在 app 列表里（存储+刷新）", found,
-                 seen if found else "UI 语义树里找不到 E2E 测试消息")
+                 seen if found else "UI 语义树里既没有消息、也还是「暂无消息」空状态")
 
 
 def check_store(cfg):

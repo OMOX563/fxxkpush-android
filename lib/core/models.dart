@@ -41,7 +41,22 @@ class NtfyMessage {
       DateTime.fromMillisecondsSinceEpoch(time * 1000);
 
   factory NtfyMessage.fromJson(Map<String, dynamic> j) {
-    final rawTags = (j['tags'] as List?) ?? const [];
+    // **tags 必须容错**：原生可能给 List，也可能给逗号分隔的 String
+    // （历史上 Android 的 org.json 把空 List 存成了字符串 "[]"）。
+    // 一条消息解析失败就足以让整个列表变成空 —— 之前这里直接 `as List?`
+    // 会抛异常，然后被上层 catch 吞掉，症状是「通知正常收到、列表永远空」。
+    final rawTagsField = j['tags'];
+    final List<String> rawTags = switch (rawTagsField) {
+      final List l => l.map((e) => e.toString()).toList(growable: false),
+      final String s => (s.isEmpty || s == '[]')
+          ? const <String>[]
+          : s
+              .split(',')
+              .map((e) => e.trim())
+              .where((e) => e.isNotEmpty && e != '[]')
+              .toList(growable: false),
+      _ => const <String>[],
+    };
     final rawActions = (j['actions'] as List?) ?? const [];
     return NtfyMessage(
       id: (j['id'] as String?) ?? '',
@@ -51,7 +66,7 @@ class NtfyMessage {
           DateTime.now().millisecondsSinceEpoch ~/ 1000,
       title: (j['title'] as String?) ?? '',
       priority: (j['priority'] as num?)?.toInt() ?? 3,
-      tags: rawTags.map((e) => e.toString()).toList(growable: false),
+      tags: rawTags,
       icon: (j['icon'] as String?) ?? '',
       click: (j['click'] as String?) ?? '',
       actions: rawActions

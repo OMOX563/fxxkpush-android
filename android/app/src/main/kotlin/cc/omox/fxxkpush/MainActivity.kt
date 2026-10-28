@@ -111,7 +111,10 @@ class MainActivity : FlutterActivity() {
 
                 "fetchMessages" -> {
                     val limit = call.argument<Int>("limit") ?: 200
-                    result.success(store.fetch(limit))
+                    val rows = store.fetch(limit)
+                    Log.i(TAG, "fetchMessages limit=$limit -> ${rows.size} rows"
+                            + (if (rows.isNotEmpty()) " first=${rows[0].take(120)}" else ""))
+                    result.success(rows)
                 }
 
                 "clearMessages" -> {

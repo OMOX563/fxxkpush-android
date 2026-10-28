@@ -4,6 +4,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -122,6 +123,21 @@ class MessageStore(context: Context) :
         )
     }
 
+    /**
+     * 删掉「标题和正文都为空」的记录。
+     *
+     * 那是历史遗留：ntfy 的 `{"event":"open"}` 控制帧**带 id**，
+     * 以前 `handleMessage` 把它当消息处理，于是每次重连都往库里插一条
+     * 标题正文全空的假消息。用户看到的就是列表里一排空白卡片。
+     * 现在 open 帧不再入库（PushService 只收 event=="message"），
+     * 这里负责把历史数据清掉。
+     */
+    fun purgeEmptyFrames(): Int {
+        return writableDatabase.delete(
+            TABLE, "COALESCE(title,'')='' AND COALESCE(body,'')=''", null
+        )
+    }
+
     /** 超出上限时删最旧的 */
     private fun trim() {
         writableDatabase.execSQL(
@@ -137,6 +153,7 @@ class MessageStore(context: Context) :
         // 这里补一刀：打开 app 读列表前先回收。
         try {
             purgeExpired()
+            purgeEmptyFrames()
         } catch (e: Exception) {
             // 清理失败不该挡住读列表
         }
@@ -152,7 +169,15 @@ class MessageStore(context: Context) :
                 jo.put("title", c.getString(2))
                 jo.put("message", c.getString(3))
                 jo.put("priority", c.getInt(4))
-                jo.put("tags", parseTags(c.getString(5)))
+                // **必须显式建 JSONArray。**
+                // `jo.put("tags", someList)` 走的是 JSONObject.put(String, Object)，
+                // 空列表在 Android 的 org.json 上会被存成**字符串 "[]"**，
+                // Dart 侧 `j['tags'] as List?` 直接抛
+                // "type 'String' is not a subtype of type 'List<dynamic>?'"，
+                // 每条消息都解析失败 → 列表永远是空的。
+                val tagsArr = JSONArray()
+                for (tg in parseTags(c.getString(5))) tagsArr.put(tg)
+                jo.put("tags", tagsArr)
                 jo.put("time", c.getLong(6))
                 out.add(jo.toString())
             }

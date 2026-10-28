@@ -22,6 +22,9 @@ class NativeBridge {
   static const _methods = MethodChannel('cc.omox.fxxkpush/methods');
   static const _events = EventChannel('cc.omox.fxxkpush/events');
 
+  /// 解析失败计数（只用于日志节流）
+  static int _parseErrCount = 0;
+
   /// 原生主动推来的事件流（新消息 / 连接状态变化）
   static Stream<Map<String, dynamic>>? _eventStream;
 
@@ -86,19 +89,38 @@ class NativeBridge {
         'fetchMessages',
         {'limit': limit},
       );
-      if (raw == null) return const [];
-      return raw
+      if (raw == null) {
+        debugPrint('fetchMessages: raw is null');
+        return const [];
+      }
+      debugPrint('fetchMessages: raw len=${raw.length} '
+          'type0=${raw.isEmpty ? "-" : raw.first.runtimeType} '
+          'first=${raw.isEmpty ? "-" : (raw.first.toString().length > 100 ? raw.first.toString().substring(0, 100) : raw.first)}');
+      final parsed = raw
           .whereType<String>()
           .map((s) {
             try {
               return NtfyMessage.fromJson(
                   jsonDecode(s) as Map<String, dynamic>);
-            } catch (_) {
+            } catch (e, st) {
+              // **别把异常吞掉** —— 之前这里是 `catch (_) { return null; }`，
+              // 结果所有消息解析失败时，列表静默变成空，UI 一直显示「暂无消息」，
+              // 而原生侧日志显示「fetchMessages -> 123 rows」。
+              // 症状和数据完全对不上，只能靠这条日志定位。
+              //
+              // 只给**第一条**失败打完整堆栈 —— 124 条全失败的话，
+              // 每条都打一遍会把 logcat 刷爆，真正的信息反而看不见。
+              if (_parseErrCount == 0) {
+                debugPrint('fetchMessages parse failed: $e\n$st\n  raw: ${s.length > 200 ? s.substring(0, 200) : s}');
+              }
+              _parseErrCount++;
               return null;
             }
           })
           .whereType<NtfyMessage>()
           .toList(growable: false);
+      debugPrint('fetchMessages: parsed ${parsed.length}/${raw.length}');
+      return parsed;
     } on PlatformException catch (e) {
       debugPrint('fetchMessages failed: ${e.message}');
       return const [];

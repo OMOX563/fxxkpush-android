@@ -22,7 +22,21 @@ class MessageStore(context: Context) :
         private const val DB_NAME = "fxxkpush.db"
         private const val DB_VERSION = 1
         private const val TABLE = "messages"
+
+        /**
+         * 条数上限（双保险）。
+         * 单靠它不够 —— 500 条里可能全是一年前的消息。
+         */
         private const val MAX_ROWS = 500
+
+        /**
+         * 消息保留天数：超过 7 天的删掉。
+         *
+         * 为什么按时间也要删：条数上限管的是"条数"，管不了"年龄"。
+         * 低频用户可能半年只收 20 条 —— 条数没超上限，但半年前的记录
+         * 会一直躺在库里，手机存储和列表长度都在浪费。
+         */
+        private const val RETENTION_DAYS = 7L
     }
 
     override fun onCreate(db: SQLiteDatabase) {
@@ -69,7 +83,21 @@ class MessageStore(context: Context) :
         writableDatabase.insertWithOnConflict(
             TABLE, null, cv, SQLiteDatabase.CONFLICT_REPLACE
         )
+        purgeExpired()
         trim()
+    }
+
+    /**
+     * 删掉超过保留期（[RETENTION_DAYS] 天）的消息。
+     *
+     * 按消息自带的 `time`（服务器给的时间戳，毫秒）算，
+     * 不用 received_at —— 后者是手机收到的时间，跨时区/时钟漂移会错。
+     */
+    fun purgeExpired(): Int {
+        val cutoff = System.currentTimeMillis() - RETENTION_DAYS * 24L * 60L * 60L * 1000L
+        return writableDatabase.delete(
+            TABLE, "time < ?", arrayOf(cutoff.toString())
+        )
     }
 
     /** 超出上限时删最旧的 */
@@ -83,6 +111,13 @@ class MessageStore(context: Context) :
 
     /** 取最近的消息（JSON 字符串列表，给 Dart 解析） */
     fun fetch(limit: Int): List<String> {
+        // 长期没收到消息时 upsert 不会触发，过期消息就没人清了 ——
+        // 这里补一刀：打开 app 读列表前先回收。
+        try {
+            purgeExpired()
+        } catch (e: Exception) {
+            // 清理失败不该挡住读列表
+        }
         val out = ArrayList<String>()
         readableDatabase.rawQuery(
             "SELECT id, topic, title, body, priority, tags, time FROM $TABLE ORDER BY time DESC LIMIT ?",

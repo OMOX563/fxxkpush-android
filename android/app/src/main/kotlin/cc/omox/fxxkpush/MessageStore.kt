@@ -70,6 +70,11 @@ class MessageStore(context: Context) :
         tags: List<String>,
         time: Long
     ) {
+        // 防御：万一调用方塞了毫秒级时间戳，统一成秒。
+        // 写入端和清理端的单位必须一致 —— 这是上一版 bug 的根，
+        // 在入口挡一道，比在清理端猜来猜去可靠。
+        // 1e11 秒 ≈ 公元 5138 年，超过它只可能是毫秒。
+        val timeSec = if (time > 100_000_000_000L) time / 1000 else time
         val cv = ContentValues().apply {
             put("id", id)
             put("topic", topic)
@@ -77,7 +82,7 @@ class MessageStore(context: Context) :
             put("body", body)
             put("priority", priority)
             put("tags", tags.joinToString(","))
-            put("time", time)
+            put("time", timeSec)
             put("received_at", System.currentTimeMillis())
         }
         writableDatabase.insertWithOnConflict(
@@ -90,13 +95,30 @@ class MessageStore(context: Context) :
     /**
      * 删掉超过保留期（[RETENTION_DAYS] 天）的消息。
      *
-     * 按消息自带的 `time`（服务器给的时间戳，毫秒）算，
-     * 不用 received_at —— 后者是手机收到的时间，跨时区/时钟漂移会错。
+     * 按消息自带的 `time` 算，不用 received_at —— 后者是手机收到的时间，
+     * 跨时区/时钟漂移会错。
+     *
+     * **单位必须是 epoch 秒，和写入端一致。**
+     *
+     * 这里曾经写成毫秒（`System.currentTimeMillis() - ... * 1000L`），
+     * 而写入端存的是 ntfy 原生的时间戳 —— **秒**（见 PushService.handleMessage
+     * 的 `jo.optLong("time", ... / 1000)`，Dart 侧 NtfyMessage.time 也是秒）。
+     * 于是 `time < cutoff` **恒成立**：秒的量级 1.8e9 永远小于毫秒的
+     * cutoff 1.8e12，每条消息一插入就被删掉。
+     *
+     * 表现极具迷惑性：**系统通知照常弹出**（通知走独立路径，不查库），
+     * 但 app 里的列表永远是空的，副标题一直显示「订阅已连接，等待推送…」。
+     *
+     * 为什么没被测出来：instrumentation 单测里的 time 用的是 100L/200L 这种
+     * 小数字（确实会被删，但那些测试从没被执行过）；而手工做的「7 天零 1 毫秒」
+     * 边界验证用的是**毫秒级**造的数据，单位假设跟真 ntfy 数据不一致。
+     * 单位这种事只能拿真实数据的量级来验。
      */
     fun purgeExpired(): Int {
-        val cutoff = System.currentTimeMillis() - RETENTION_DAYS * 24L * 60L * 60L * 1000L
+        val cutoffSec =
+            System.currentTimeMillis() / 1000 - RETENTION_DAYS * 24L * 60L * 60L
         return writableDatabase.delete(
-            TABLE, "time < ?", arrayOf(cutoff.toString())
+            TABLE, "time < ?", arrayOf(cutoffSec.toString())
         )
     }
 

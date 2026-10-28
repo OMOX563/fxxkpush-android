@@ -397,6 +397,41 @@ def check_receive(cfg, timeout=45):
                  "等待 %ds" % timeout if not got_log else "")
 
 
+def check_message_in_list(wait=40):
+    """消息有没有真的出现在 app 的消息列表里。
+
+    **这是「存储修好了」唯一可信的断言。**
+
+    - `check_receive` 只看 logcat 里的 "message stored+notified"，而那行日志
+      是在 `store.upsert()` **之后**打印的 —— 旧 bug 里消息一插入就被
+      `purgeExpired` 删掉，日志照样打。所以它证明不了消息还在库里。
+    - `check_store` 要 `run-as` 权限，release 包直接 SKIP。
+
+    所以直接看 **UI 语义树**里有没有这条消息 —— 一次覆盖「存储」+「列表刷新」
+    两段。Flutter 的语义节点能通过 uiautomator dump 读到（脚本本来就在用它
+    找「保存并连接」按钮），所以这条路是通的。
+    """
+    # 确保 app 在前台（否则列表根本不在语义树里）
+    sh(["shell", "am", "start", "-n", PKG + "/.MainActivity"], timeout=60)
+    time.sleep(2)
+
+    deadline = time.time() + wait
+    found = False
+    seen = ""
+    while time.time() < deadline:
+        nodes = _dump_nodes()
+        blob = " ".join((n[1] or "") + " " + (n[2] or "") for n in nodes)
+        blob = blob.replace("&#10;", " ").replace("\n", " ")
+        if "E2E" in blob:
+            found = True
+            i = blob.find("E2E")
+            seen = blob[max(0, i - 30):i + 60].strip()
+            break
+        time.sleep(3)
+    return check("消息出现在 app 列表里（存储+刷新）", found,
+                 seen if found else "UI 语义树里找不到 E2E 测试消息")
+
+
 def check_store(cfg):
     """消息是否进了 app 的 sqlite。
 
@@ -489,6 +524,7 @@ def main():
         check_receive(cfg)
         check_store(cfg)
         check_notification()
+        check_message_in_list()
 
     print("\n--- 深链 ---")
     check_deeplink()

@@ -2,6 +2,7 @@ package cc.omox.fxxkpush
 
 import android.content.ContentValues
 import android.content.Context
+import android.util.Log
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import org.json.JSONArray
@@ -21,7 +22,7 @@ class MessageStore(context: Context) :
 
     companion object {
         private const val DB_NAME = "fxxkpush.db"
-        private const val DB_VERSION = 1
+        private const val DB_VERSION = 2
         private const val TABLE = "messages"
 
         /**
@@ -50,15 +51,27 @@ class MessageStore(context: Context) :
                 priority INTEGER,
                 tags TEXT,
                 time INTEGER,
-                received_at INTEGER
+                received_at INTEGER,
+                feedback INTEGER NOT NULL DEFAULT 0
             )"""
         )
         db.execSQL("CREATE INDEX idx_time ON $TABLE(time DESC)")
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        db.execSQL("DROP TABLE IF EXISTS $TABLE")
-        onCreate(db)
+        // **只增列，绝不 DROP TABLE** —— 重建表会把用户已存的消息全清空。
+        // v1 -> v2：加 feedback 列（0=未选 1=有用 -1=没用）。
+        if (oldVersion < 2) {
+            try {
+                db.execSQL("ALTER TABLE $TABLE ADD COLUMN feedback INTEGER NOT NULL DEFAULT 0")
+            } catch (e: Exception) {
+                // 列已存在等情况 —— 绝不能让升级失败把整个 app 搞崩。
+                // sqlite 的 user_version 是存在库里的，第二个 MessageStore 实例
+                // （PushService 与 MainActivity 各一个）打开时看到版本已是 2，
+                // 不会重复走 onUpgrade；但这里仍然兜一层，防止任何意外。
+                Log.w("MessageStore", "add feedback column skipped: ${e.message}")
+            }
+        }
     }
 
     /** 插入或更新一条消息 */
@@ -138,6 +151,21 @@ class MessageStore(context: Context) :
         )
     }
 
+    /**
+     * 记录一条消息的「有用/没用」选择。
+     *
+     * value: 1 = 有用，-1 = 没用，0 = 取消选择。
+     * 写进本地库，重开 app 还在 —— 用户点完要能看到「记上了」，
+     * 而不是刷新就没了。
+     */
+    fun setFeedback(id: String, value: Int): Boolean {
+        val n = writableDatabase.update(
+            TABLE, ContentValues().apply { put("feedback", value) },
+            "id = ?", arrayOf(id)
+        )
+        return n > 0
+    }
+
     /** 超出上限时删最旧的 */
     private fun trim() {
         writableDatabase.execSQL(
@@ -159,7 +187,7 @@ class MessageStore(context: Context) :
         }
         val out = ArrayList<String>()
         readableDatabase.rawQuery(
-            "SELECT id, topic, title, body, priority, tags, time FROM $TABLE ORDER BY time DESC LIMIT ?",
+            "SELECT id, topic, title, body, priority, tags, time, feedback FROM $TABLE ORDER BY time DESC LIMIT ?",
             arrayOf(limit.toString())
         ).use { c ->
             while (c.moveToNext()) {
@@ -179,6 +207,7 @@ class MessageStore(context: Context) :
                 for (tg in parseTags(c.getString(5))) tagsArr.put(tg)
                 jo.put("tags", tagsArr)
                 jo.put("time", c.getLong(6))
+                jo.put("feedback", c.getInt(7))
                 out.add(jo.toString())
             }
         }

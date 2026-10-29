@@ -117,6 +117,12 @@ class MainActivity : FlutterActivity() {
                     result.success(rows)
                 }
 
+                "setFeedback" -> {
+                    val id = call.argument<String>("id")
+                    val value = call.argument<Int>("value") ?: 0
+                    result.success(id != null && store.setFeedback(id, value))
+                }
+
                 "clearMessages" -> {
                     store.clear()
                     result.success(true)

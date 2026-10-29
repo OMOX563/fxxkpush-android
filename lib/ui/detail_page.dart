@@ -20,14 +20,72 @@ class _DetailPageState extends State<DetailPage> {
   bool _feedbackBusy = false;
   String? _feedbackMsg;
 
-  Future<void> _sendFeedback(String text) async {
+  /// 用户的选择：0 = 未选，1 = 有用，-1 = 没用。
+  ///
+  /// 从 [NtfyMessage.feedback] 起步 —— 那是本地 sqlite 里记着的，
+  /// 所以退出再进来，选择还在。
+  /// （widget.message 是构造时的快照，不能直接改，所以本地存一份。）
+  late int _feedback;
+
+  @override
+  void initState() {
+    super.initState();
+    _feedback = widget.message.feedback;
+  }
+
+  /// 记录反馈。
+  ///
+  /// value: 1 = 有用，-1 = 没用。**再点同一个 = 取消选择**。
+  Future<void> _sendFeedback(int value, String payload) async {
+    final next = (_feedback == value) ? 0 : value;
     setState(() => _feedbackBusy = true);
-    final ok = await widget.state.sendFeedback(text);
+    final (local, remote) =
+        await widget.state.setFeedback(widget.message.id, next, payload: payload);
     if (!mounted) return;
+
+    final msg = !local
+        ? '记录失败'
+        : (next == 0
+            ? '已取消记录'
+            : (remote ? '已记录' : '已记录（未同步到服务器）'));
+
     setState(() {
       _feedbackBusy = false;
-      _feedbackMsg = ok ? '已反馈' : '反馈失败';
+      if (local) _feedback = next;
+      _feedbackMsg = msg;
     });
+
+    if (!local) return;
+    // **弹窗确认** —— 点了必须立刻有反馈，不然用户不知道记上没有
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        content: Row(
+          children: [
+            Icon(
+              next == 0
+                  ? Icons.undo
+                  : (next > 0 ? Icons.check_circle : Icons.cancel),
+              size: 18,
+              color: Colors.white,
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                next == 0
+                    ? '已取消记录'
+                    : (next > 0 ? '已记录：标记为有用' : '已记录：标记为没用'),
+                style: const TextStyle(color: Colors.white),
+              ),
+            ),
+          ],
+        ),
+        backgroundColor: next == 0
+            ? const Color(0xFF334155)
+            : (next > 0 ? const Color(0xFF268257) : const Color(0xFFB42318)),
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 2),
+      ));
   }
 
   @override
@@ -125,18 +183,24 @@ class _DetailPageState extends State<DetailPage> {
                     children: [
                       _FeedbackButton(
                         icon: Icons.thumb_up_outlined,
+                        filledIcon: Icons.thumb_up,
                         label: '有用',
                         color: g.ok,
                         busy: _feedbackBusy,
-                        onTap: () => _sendFeedback('👍 $feedbackPayload'),
+                        selected: _feedback == 1,
+                        onTap: () => _sendFeedback(1, '👍 $feedbackPayload'),
                       ),
                       const SizedBox(width: 10),
                       _FeedbackButton(
                         icon: Icons.thumb_down_outlined,
+                        filledIcon: Icons.thumb_down,
                         label: '没用',
-                        color: g.alertMid,
+                        // **用 alertHigh（红），不是 alertMid（橙）** ——
+                        // 「没用」是明确的否定反馈，橙色看着像「注意」而不是「否」。
+                        color: g.alertHigh,
                         busy: _feedbackBusy,
-                        onTap: () => _sendFeedback('👎 $feedbackPayload'),
+                        selected: _feedback == -1,
+                        onTap: () => _sendFeedback(-1, '👎 $feedbackPayload'),
                       ),
                     ],
                   ),
@@ -145,7 +209,7 @@ class _DetailPageState extends State<DetailPage> {
                     Text(
                       _feedbackMsg!,
                       style: TextStyle(
-                        color: _feedbackMsg == '已反馈' ? g.ok : g.alertHigh,
+                        color: _feedbackMsg == '记录失败' ? g.alertHigh : g.ok,
                         fontSize: 12.5,
                       ),
                     ),
@@ -216,33 +280,66 @@ class _Chip extends StatelessWidget {
   }
 }
 
+/// 反馈按钮。
+///
+/// 选中时**整块填充纯色**（绿=有用 / 红=没用）、文字与图标转白、
+/// 线性图标换成实心 —— 一眼能看出这条已经打过分了。
+/// 未选中时保持描边风格，颜色淡一点。
 class _FeedbackButton extends StatelessWidget {
   const _FeedbackButton({
     required this.icon,
+    required this.filledIcon,
     required this.label,
     required this.color,
     required this.busy,
+    required this.selected,
     required this.onTap,
   });
 
   final IconData icon;
+  final IconData filledIcon;
   final String label;
   final Color color;
   final bool busy;
+  final bool selected;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     return Expanded(
-      child: OutlinedButton.icon(
-        onPressed: busy ? null : onTap,
-        icon: Icon(icon, size: 17, color: color),
-        label: Text(label, style: TextStyle(color: color)),
-        style: OutlinedButton.styleFrom(
-          side: BorderSide(color: color.withValues(alpha: 0.45)),
-          padding: const EdgeInsets.symmetric(vertical: 11),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        curve: Curves.easeOutCubic,
+        decoration: BoxDecoration(
+          // 选中 → 纯色填充；未选中 → 透明（描边在外层画）
+          color: selected ? color : Colors.transparent,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: selected ? color : color.withValues(alpha: 0.45),
+            width: selected ? 0 : 1,
+          ),
+        ),
+        child: OutlinedButton.icon(
+          onPressed: busy ? null : onTap,
+          icon: Icon(
+            selected ? filledIcon : icon,
+            size: 17,
+            color: selected ? Colors.white : color,
+          ),
+          label: Text(
+            label,
+            style: TextStyle(
+              color: selected ? Colors.white : color,
+              fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+            ),
+          ),
+          style: OutlinedButton.styleFrom(
+            side: BorderSide.none,
+            backgroundColor: Colors.transparent,
+            padding: const EdgeInsets.symmetric(vertical: 11),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
           ),
         ),
       ),

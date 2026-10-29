@@ -140,6 +140,24 @@ class NativeBridge {
     }
   }
 
+  /// 记录一条消息的「有用/没用」选择（写入本地 sqlite，重开还在）
+  ///
+  /// value: 1 = 有用，-1 = 没用，0 = 取消选择
+  static Future<bool> setFeedback({required String id, required int value}) async {
+    try {
+      final ok = await _methods.invokeMethod<bool>('setFeedback', {
+        'id': id,
+        'value': value,
+      });
+      return ok ?? false;
+    } on PlatformException catch (e) {
+      debugPrint('setFeedback failed: ${e.message}');
+      return false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
   /// 反馈：调用 ntfy 的 publish 接口发到 feedback topic
   static Future<bool> publish({
     required String baseUrl,

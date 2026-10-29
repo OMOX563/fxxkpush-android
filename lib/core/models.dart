@@ -20,6 +20,7 @@ class NtfyMessage {
     this.icon = '',
     this.click = '',
     this.actions = const [],
+    this.feedback = 0,
   });
 
   final String id;
@@ -32,6 +33,12 @@ class NtfyMessage {
   final String icon;
   final String click;
   final List<NtfyAction> actions;
+
+  /// 用户对这条消息的选择：0 = 未选，1 = 有用，-1 = 没用。
+  ///
+  /// 存在本地 sqlite 里（原生侧），重开 app 还在 ——
+  /// 用户点完要能看到「记上了」，而不是退出详情页就没了。
+  final int feedback;
 
   /// 优先级 >= 4 视为高优（红色强调）
   bool get isHigh => priority >= 4;
@@ -73,6 +80,7 @@ class NtfyMessage {
           .whereType<Map>()
           .map((e) => NtfyAction.fromJson(e.cast<String, dynamic>()))
           .toList(growable: false),
+      feedback: (j['feedback'] as num?)?.toInt() ?? 0,
     );
   }
 
@@ -87,6 +95,7 @@ class NtfyMessage {
         'icon': icon,
         'click': click,
         'actions': actions.map((a) => a.toJson()).toList(),
+        'feedback': feedback,
       };
 }
 

@@ -175,13 +175,19 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 记录「有用/没用」选择。
+  /// 记录「有用/没用」选择 —— **只写本地，立即返回**。
   ///
-  /// 先写本地 sqlite（用户要看到「已记录」并且重开还在），
-  /// 再同步到 ntfy 的 fp-feedback 话题（PC 侧收集反馈）。
-  /// 返回 (本地已记, 是否已同步到服务器)。
-  Future<(bool, bool)> setFeedback(String id, int value, {String? payload}) async {
+  /// **为什么不把网络同步放在这里**：之前这个方法最后 `await sendFeedback(...)`，
+  /// 而那是 POST 到 VPS ntfy 的网络请求（走代理，1~10 秒）。于是用户点了
+  /// 按钮要等这个往返结束才看到颜色变化 —— 表现是「点了没反应，
+  /// 退出重进才变绿」（重进时直接从 AppState 的快照读到已写入的值）。
+  ///
+  /// 现在：**本地写完就返回 → UI 立刻变色 → 网络同步丢后台**。
+  ///
+  /// 返回是否写入成功。
+  Future<bool> setFeedback(String id, int value) async {
     final local = await NativeBridge.setFeedback(id: id, value: value);
+    if (!local) return false;
     // 内存里的列表也更新 —— 否则详情页之外的 UI 拿到的还是旧快照
     final idx = _messages.indexWhere((m) => m.id == id);
     if (idx >= 0) {
@@ -202,13 +208,24 @@ class AppState extends ChangeNotifier {
         );
       notifyListeners();
     }
-    // **payload 要带消息摘要** —— PC 侧（fp-feedback 话题的消费者）靠
-    // 「[topic] 正文前几十字」认出用户评的是哪条消息。只发 id 等于把
-    // 这层信息丢了，PC 那边就不知道这条反馈说的是什么。
+    return true;
+  }
+
+  /// 把反馈同步到 ntfy 的 fp-feedback 话题。
+  ///
+  /// **调用方通常不 await** —— UI 不该等它。同步失败只记日志，
+  /// 不打扰用户（本地已经记上了，这才是用户在意的事）。
+  ///
+  /// payload 要带消息摘要 —— PC 侧靠「[topic] 正文前几十字」认出
+  /// 用户评的是哪条消息，只发 id 等于把这层信息丢了。
+  Future<bool> syncFeedback(String id, int value, String? payload) async {
     final text = payload ??
         (value > 0 ? '👍 $id' : (value < 0 ? '👎 $id' : '↺ $id'));
-    final remote = await sendFeedback(text);
-    return (local, remote);
+    final ok = await sendFeedback(text);
+    if (!ok) {
+      debugPrint('feedback sync to ntfy failed (本地已记录): $text');
+    }
+    return ok;
   }
 
   /// 反馈（👍/👎）到 feedback topic

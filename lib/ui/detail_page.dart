@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../core/app_state.dart';
@@ -39,20 +41,18 @@ class _DetailPageState extends State<DetailPage> {
   Future<void> _sendFeedback(int value, String payload) async {
     final next = (_feedback == value) ? 0 : value;
     setState(() => _feedbackBusy = true);
-    final (local, remote) =
-        await widget.state.setFeedback(widget.message.id, next, payload: payload);
-    if (!mounted) return;
 
-    final msg = !local
-        ? '记录失败'
-        : (next == 0
-            ? '已取消记录'
-            : (remote ? '已记录' : '已记录（未同步到服务器）'));
+    // **只等本地写入** —— 网络同步另走后台（见下面）。
+    // 之前这里等的是「本地 + 网络往返」，用户点了要等好几秒才看到颜色变化。
+    final local = await widget.state.setFeedback(widget.message.id, next);
+    if (!mounted) return;
 
     setState(() {
       _feedbackBusy = false;
       if (local) _feedback = next;
-      _feedbackMsg = msg;
+      _feedbackMsg = !local
+          ? '记录失败'
+          : (next == 0 ? '已取消记录' : '已记录');
     });
 
     if (!local) return;
@@ -86,6 +86,15 @@ class _DetailPageState extends State<DetailPage> {
         behavior: SnackBarBehavior.floating,
         duration: const Duration(seconds: 2),
       ));
+
+    // **网络同步丢后台** —— 不 await，UI 不等它。
+    // 本地已经记上了（这才是用户在意的事），同步只是把这份反馈
+    // 送到 PC 侧去统计。失败只写日志。
+    unawaited(widget.state
+        .syncFeedback(widget.message.id, next, payload)
+        .then((ok) {
+      if (!ok) debugPrint('feedback sync failed: $payload');
+    }));
   }
 
   @override
